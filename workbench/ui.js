@@ -164,12 +164,30 @@
     });
     if (n === 5) { document.querySelectorAll('#panel-2,#panel-3,#panel-4').forEach(p => p.style.display = 'none'); }
   }
-  document.querySelectorAll('#steps li').forEach(li => li.onclick = () => {
-    const v = +li.dataset.step;
-    if (v >= 2 && !S.columns.length) return toast('请先导入数据');
-    if (v >= 4 && !S.res) { setStep(3); return toast('先完成校准，再点「运行完整分析」'); }
-    if (v === 5 && !S.res) return toast('还没有结果，先在第 4 步运行分析');
-    setStep(v); setTab(v === 5 ? 'profile' : 'guide');
+  function gotoStep(v) {
+    if (v >= 2 && !S.columns.length) { toast('请先导入数据'); scrollTop(); return; }
+    if (v >= 4 && !S.res) {
+      // 不给结果就跳第 4/5 步 → 停在参数页，明确告诉用户
+      setStep(3); setTab('guide');
+      toast('还没有分析结果：先在第 4 步点「运行完整分析」');
+      scrollTop(); return;
+    }
+    setStep(v);
+    setTab(v === 5 ? 'profile' : 'guide');
+    scrollTop();
+  }
+  function scrollTop() {
+    try { window.scrollTo({ top: 0, behavior: 'smooth' }); } catch (e) { window.scrollTo(0, 0); }
+  }
+  document.querySelectorAll('#steps li').forEach(li => {
+    li.onclick = () => gotoStep(+li.dataset.step);
+    li.style.cursor = 'pointer';
+  });
+  // 键盘快捷键：1~5 切换步骤，Esc 回第 1 步
+  document.addEventListener('keydown', e => {
+    if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
+    if (e.key >= '1' && e.key <= '5') gotoStep(+e.key);
+    else if (e.key === 'Escape') gotoStep(1);
   });
 
   /* ---------------- 数据载入 ---------------- */
@@ -213,6 +231,13 @@
   }
 
   const DS = window.__DATASETS__ || {};
+  (function bindDsBadge() {
+    const tag = document.getElementById('dsTag');
+    if (!tag) return;
+    tag.style.cursor = 'pointer';
+    tag.title = '点击重新选择数据';
+    tag.onclick = () => { gotoStep(1); toast('在第 1 步可以换一份数据或拖入文件'); };
+  })();
   (function initDatasets() {
     const sel = $('#dsSelect');
     if (!sel) return;
@@ -235,8 +260,21 @@
     applyData({ columns: d.columns, rows: d.rows }, d.name, d.desc + ' · 来源：' + d.source);
   }
 
+  /** 清空所有分析产物（换数据时必须调用，否则旧结果会残留） */
+  function resetAnalysis(keepTab) {
+    S.res = null;
+    S.extra = {};
+    S.target = null;
+    S.factors = [];
+    S.rowsWork = null;
+    if (!keepTab) S.tab = 'guide';
+    const st = $('#status');
+    if (st) st.textContent = '等待运行';
+  }
+
   function applyData(parsed, name, desc) {
     if (!parsed.columns.length) return toast('文件里没有读到表格');
+    resetAnalysis();
     S.columns = parsed.columns;
     S.rows = parsed.rows;
     S.rowsRaw = parsed.rows.map(r => r.slice());
@@ -274,6 +312,7 @@
     setTab('profile');
     renderProfileDirect(prof);
     toast('数据已载入');
+    try { window.scrollTo({ top: 0, behavior: 'smooth' }); } catch (e) { window.scrollTo(0, 0); }
   }
 
   function renderFactors() {
@@ -624,6 +663,23 @@
   function renderTab() {
     updateSummary();
     const pane = $('#pane');
+    // 结果区顶部固定工具条：随时能重跑或换数据
+    const oldBar = document.getElementById('resultBar');
+    if (oldBar) oldBar.remove();
+    if (S.res) {
+      const bar = el('div', { id: 'resultBar', class: 'resultbar' });
+      const b1 = el('button', { class: 'ghost mini', text: '↻ 重跑分析' });
+      b1.onclick = () => { setStep(4); scrollTop(); toast('参数页已打开，可调整后重跑'); };
+      const b2 = el('button', { class: 'ghost mini', text: '⇄ 换一份数据' });
+      b2.onclick = () => gotoStep(1);
+      const b3 = el('button', { class: 'ghost mini', text: '⎘ 导出报告' });
+      b3.onclick = () => { setTab('report'); scrollTop(); };
+      bar.appendChild(el('span', { class: 'muted', style: 'font-size:12px',
+        text: `当前结果：${S.meta ? '' : ''}${S.columns.length} 列 · ${S.rows.length} 行` }));
+      bar.appendChild(el('div', { class: 'grow' }));
+      bar.appendChild(b1); bar.appendChild(b2); bar.appendChild(b3);
+      pane.parentNode.insertBefore(bar, pane);
+    }
     if (!S.res && S.tab !== 'guide') {
       pane.innerHTML = '<div class="muted">先导入数据并运行分析。</div>';
       return;
