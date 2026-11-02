@@ -991,10 +991,13 @@
       const yBounds = { lo: quantile(ySorted, o.lowPct / 100), hi: quantile(ySorted, o.highPct / 100) };
       if (!(yBounds.hi > yBounds.lo)) yBounds.hi = yBounds.lo + 1e-6;
 
-      const XtrCodes = trImp.map(r => r.map((v, j) =>
-        calibrateWith([v], bounds[j], { levels: o.levels, drops: o.drops, seed: o.seed }).codes[0]));
-      const XteCodes = teImp.map(r => r.map((v, j) =>
-        calibrateWith([v], bounds[j], { levels: o.levels, drops: o.drops, seed: o.seed }).codes[0]));
+      // 按列批量离散化：每列只建一次云、只跑一轮云滴
+      // （逐单元格调用会让复杂度乘上样本数，400×11 会慢几百倍）
+      const colOpt = { levels: o.levels, drops: o.drops, seed: o.seed };
+      const trCols = names.map((_, j) => calibrateWith(trImp.map(r => r[j]), bounds[j], colOpt).codes);
+      const teCols = names.map((_, j) => calibrateWith(teImp.map(r => r[j]), bounds[j], colOpt).codes);
+      const XtrCodes = trImp.map((_, i) => names.map((_, j) => trCols[j][i]));
+      const XteCodes = teImp.map((_, i) => names.map((_, j) => teCols[j][i]));
       const yTrCodes = calibrateWith(yTr, yBounds, { levels: o.levels, drops: o.drops, seed: o.seed }).codes;
       const yTeCodes = calibrateWith(yTe, yBounds, { levels: o.levels, drops: o.drops, seed: o.seed }).codes;
 
@@ -1484,4 +1487,4 @@
     kmeans, silhouette, pca, cart, network, report,
     numericCols, isNum, mean, std, quantile, LEVEL_LABELS
   };
-})(window);
+})(typeof window !== 'undefined' ? window : self);

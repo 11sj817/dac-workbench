@@ -19,6 +19,98 @@
     return n;
   };
   const PAL = ['#4c9aff', '#22d3ee', '#f59e0b', '#a78bfa', '#34d399', '#f472b6'];
+
+  /* ---------------- XSS 防护：所有动态文本必须过这里 ---------------- */
+  const ESC_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;', '`': '&#96;' };
+  function esc(v) {
+    if (v === null || v === undefined) return '';
+    return String(v).replace(/[&<>"'`]/g, c => ESC_MAP[c]);
+  }
+  /* 安全文本节点：任何"可能是用户数据"的地方优先用它 */
+  function txt(tag, value, attrs) {
+    const n = el(tag, attrs || {});
+    n.textContent = value === null || value === undefined ? '' : String(value);
+    return n;
+  }
+
+  /* ---------------- Web Worker 调度器 ---------------- */
+  /* 调试钩子：便于在控制台查看 Worker 状态（不暴露任何密钥） */
+  const WK = {
+    worker: null,
+    url: null,
+    seq: 0,
+    pending: new Map(),
+    supported: typeof Worker !== 'undefined' && !!window.__WORKER_SRC__,
+    fallbackNotified: false,
+
+    ensure() {
+      if (this.worker) return this.worker;
+      if (!this.supported) return null;
+      try {
+        const blob = new Blob([window.__WORKER_SRC__], { type: 'application/javascript' });
+        this.url = URL.createObjectURL(blob);
+        this.worker = new Worker(this.url);
+        this.worker.onmessage = ev => this._onMsg(ev.data);
+        this.worker.onerror = e => {
+          this.pending.forEach(t => { clearTimeout(t.timer); t.reject(new Error('Worker 崩溃: ' + (e.message || 'unknown'))); });
+          this.pending.clear();
+          this.worker = null;
+        };
+        return this.worker;
+      } catch (e) {
+        this.supported = false;
+        return null;
+      }
+    },
+
+    _onMsg(m) {
+      const t = this.pending.get(m.id);
+      if (!t) return;
+      // 非终态消息（start / progress / pong）只做进度通知，不能清 pending
+      if (m.status === 'start' || m.status === 'pong') return;
+      if (m.status === 'progress') { if (t.onProgress) t.onProgress(m.progress); return; }
+      clearTimeout(t.timer);
+      this.pending.delete(m.id);
+      if (m.status === 'done') t.resolve(m.result);
+      else if (m.status === 'error') t.reject(new Error(m.error || '计算失败'));
+    },
+
+    run(task, payload, opts) {
+      const o = opts || {};
+      return new Promise((resolve, reject) => {
+        const w = this.ensure();
+        if (!w) {
+          if (!this.fallbackNotified) {
+            this.fallbackNotified = true;
+            toast('当前环境不支持 Web Worker，已降级为主线程计算（大样本可能卡顿）', 5000);
+          }
+          return reject(new Error('NO_WORKER'));
+        }
+        // 防重复：同一任务已有在跑就拒绝（避免双触发吃内存）
+        if (this.pending.size > 0 && o.exclusive !== false) {
+          for (const [, t] of this.pending) {
+            if (t.task === task) return reject(new Error('已有同类任务在运行，请等待或取消'));
+          }
+        }
+        const id = ++this.seq;
+        const timer = setTimeout(() => {
+          this.pending.delete(id);
+          reject(new Error('计算超时（' + ((o.timeoutMs || 120000) / 1000) + 's），已中断'));
+        }, o.timeoutMs || 120000);
+        this.pending.set(id, { resolve, reject, timer, onProgress: o.onProgress, task });
+        w.postMessage({ id, task, payload });
+      });
+    },
+
+    cancelAll() {
+      this.pending.forEach(t => { clearTimeout(t.timer); t.reject(new Error('已取消')); });
+      this.pending.clear();
+      if (this.worker) { this.worker.terminate(); this.worker = null; }
+      if (this.url) { URL.revokeObjectURL(this.url); this.url = null; }
+    }
+  };
+  window.__WK = WK;   // 调试用
+
   const fmt = (v, d = 3) => {
     if (v === null || v === undefined || Number.isNaN(v)) return '-';
     if (typeof v !== 'number') return v;
@@ -34,6 +126,15 @@
     res: null, extra: {}, tab: 'guide', step: 1, busy: false,
     rowsWork: null, rowsRaw: null
   };
+
+  /* 底部状态栏 */
+  function setBusy(on, text) {
+    let bar = document.getElementById('statusbar');
+    if (!bar) return;
+    bar.classList.toggle('on', !!on);
+    const label = bar.querySelector('.sb-text');
+    if (label) label.textContent = text || (on ? '计算中…' : '就绪');
+  }
 
   let toastTimer;
   function toast(msg, ms = 2600) {
@@ -134,7 +235,7 @@
     if (S.numeric.length < 2) return toast('至少需要 2 个数值列', 5000);
 
     const prof = C.profile(S.columns, S.rows);
-    $('#dsInfo').innerHTML = `<b>${name}</b><br>${parsed.rows.length} 行 · ${parsed.columns.length} 列 · 数值列 ${S.numeric.length} 个`
+    $('#dsInfo').innerHTML = `<b>${esc(name)}</b><br>${parsed.rows.length} 行 · ${parsed.columns.length} 列 · 数值列 ${S.numeric.length} 个`
       + (desc ? `<br><span class="muted">${desc}</span>` : '');
     $('#status').textContent = `${parsed.rows.length} 行已就绪`;
     const tag = $('#dsTag');
@@ -436,7 +537,7 @@
         });
       }
       arr.forEach(c => body.appendChild(el('tr', { html:
-         `<td>${c.name}</td>
+         `<td>${esc(c.name)}</td>
          <td><span class="pill ${c.numeric ? 'ok' : 'warn'}">${c.numeric ? '数值' : '文本'}</span></td>
        <td>${c.missing}</td><td>${fmt(c.median)}</td><td>${fmt(c.std)}</td>
          <td>${c.outliers ?? '-'}</td><td>${fmt(c.skew, 2)}</td>` })));
@@ -554,7 +655,7 @@
         : c.missing > 0 ? '<span class="pill info">有缺失</span>'
         : '<span class="pill ok">完整</span>';
       bd.appendChild(el('tr', { html:
-        `<td>${c.name}</td><td>${c.missing}</td>
+        `<td>${esc(c.name)}</td><td>${c.missing}</td>
          <td><div class="bar" style="width:90px;display:inline-block;vertical-align:middle">
            <i style="width:${Math.round(c.rate * 100)}%;background:${c.rate > 0.5 ? '#ef4444' : '#f59e0b'}"></i></div>
            <span class="muted"> ${pct(c.rate)}</span></td>
@@ -645,7 +746,7 @@
           if (!pv.perCol[j]) return;
           const fill = pv.model.fillValues[j];
           b2.appendChild(el('tr', { html:
-            `<td>${n}</td><td>${pv.strategies[j]}</td><td>${pv.perCol[j]}</td>
+            `<td>${esc(n)}</td><td>${esc(pv.strategies[j])}</td><td>${pv.perCol[j]}</td>
              <td>${fill === null ? '-' : fmt(fill, 3)}</td>` }));
         });
         tb2.appendChild(b2);
@@ -670,11 +771,13 @@
 
     const btnRun = el('button', { class: 'mini', text: '运行严格 CV + 泄漏审计' });
     const outBox = el('div', { style: 'margin-top:10px' });
-    btnRun.onclick = () => {
+    btnRun.onclick = async () => {
       btnRun.disabled = true;
       btnRun.textContent = '计算中…';
-      setTimeout(() => {
-        try {
+      setBusy(true, '严格交叉验证计算中…');
+      const cancelBtn = document.getElementById('sb-cancel');
+      if (cancelBtn) cancelBtn.style.display = '';
+      try {
           const target = S.target || names[names.length - 1];
           const idxT = names.indexOf(target);
           const factorIdx = names.map((n, j) => j).filter(j => j !== idxT && S.numeric.includes(names[j]));
@@ -683,24 +786,35 @@
           const yv = WR.map(r => r[idxT]);
           const fnames = factorIdx.map(j => names[j]);
           const levels = S.params.levels || 3;
-          const cv = C.crossValidateStrict(rawX, yv, fnames, C.LEVEL_LABELS[levels], {
+          const cvOpts = {
             k: q.k, seed: q.seed,
             impute: q.strategy, knn: { k: q.knnK, weighted: q.weighted },
             lowPct: S.params.lowPct || 25, highPct: S.params.highPct || 75,
             levels, drops: Math.min(400, S.params.drops || 400),
             treeDepth: S.params.treeDepth || 3,
             minLeaf: Math.max(10, Math.round(WR.length / 40))
-          });
+          };
+          let cv;
+          try {
+            cv = await WK.run('strictCV',
+              { rawX, yRaw: yv, names: fnames, labels: C.LEVEL_LABELS[levels], opts: cvOpts },
+              { onProgress: p2 => setBusy(true, '严格交叉验证 ' + p2 + '%'), timeoutMs: 240000 });
+          } catch (e2) {
+            if (e2.message !== 'NO_WORKER') throw e2;
+            cv = C.crossValidateStrict(rawX, yv, fnames, C.LEVEL_LABELS[levels], cvOpts);
+          }
           q.strict = cv;
           q.audit = cv.ok ? C.leakageAudit(cv, rawX, fnames) : null;
         } catch (e) {
           q.strict = { ok: false, reason: e.message };
           q.audit = null;
         }
+        const cb2 = document.getElementById('sb-cancel');
+        if (cb2) cb2.style.display = 'none';
+        setBusy(false, '就绪');
         btnRun.disabled = false;
         btnRun.textContent = '运行严格 CV + 泄漏审计';
         renderQuality();
-      }, 20);
     };
     outBox.appendChild(btnRun);
     pane.appendChild(outBox);
@@ -806,7 +920,7 @@
     const tb = el('table');
     tb.appendChild(el('thead', { html: '<tr><th>变量对</th><th>r</th><th>|r|</th></tr>' }));
     const b = el('tbody');
-    pairs.slice(0, 8).forEach(p => b.appendChild(el('tr', { html: `<td>${p.a} × ${p.b}</td><td>${p.r.toFixed(3)}</td><td>${Math.abs(p.r).toFixed(3)}</td>` })));
+    pairs.slice(0, 8).forEach(p => b.appendChild(el('tr', { html: `<td>${esc(p.a)} × ${esc(p.b)}</td><td>${p.r.toFixed(3)}</td><td>${Math.abs(p.r).toFixed(3)}</td>` })));
     tb.appendChild(b); pane.appendChild(tb);
   }
 
@@ -829,7 +943,7 @@
            <div class="bar"><i style="width:${Math.round(100 * v / Math.max(1, maxC))}%;background:${PAL[i]}"></i></div>
            <span class="muted" style="font-size:10.5px">${v}</span></div>`).join('');
       body.appendChild(el('tr', { html:
-        `<td>${label}</td><td style="text-align:left">${bars}</td>
+        `<td>${esc(label)}</td><td style="text-align:left">${bars}</td>
          <td>${c.thresholds.map(t => t.toFixed(2)).join(' / ')}</td>
          <td>${c.meanMu.toFixed(3)}</td><td>${pct(c.ambiguousRate)}</td>` }));
     });
@@ -906,8 +1020,8 @@
     sc.stats.forEach((s, i) => {
       const nm = (sc.names && sc.names[i]) || { tag: '', perf: '' };
       b.appendChild(el('tr', { html:
-        `<td>${s.name}</td>
-         <td style="text-align:left"><span class="pill ok">${nm.tag || '-'}</span> <span class="muted">${nm.perf || ''}</span></td>
+        `<td>${esc(s.name)}</td>
+         <td style="text-align:left"><span class="pill ok">${esc(nm.tag || '-')}</span> <span class="muted">${esc(nm.perf || '')}</span></td>
          <td>${s.n}</td>` +
         S.res.meta.factors.map(f => `<td>${fmt(s.mean[f], 2)}</td>`).join('') +
         `<td><b>${fmt(s.mean[S.res.meta.target], 3)}</b></td>` }));
@@ -1004,8 +1118,8 @@
     const rules = t.rules.slice().sort((a, b2) => b2.support * b2.confidence - a.support * a.confidence);
     rules.forEach((r, i) => {
       pane.appendChild(el('div', { class: 'rule', html:
-        `<b>R${i + 1}</b> IF ${r.conditions.map(c => `<code>${c}</code>`).join(' 且 ') || '（无分裂）'}
-         → THEN <code>${S.res.meta.target} = ${r.then}</code>
+        `<b>R${i + 1}</b> IF ${r.conditions.map(c => `<code>${esc(c)}</code>`).join(' 且 ') || '（无分裂）'}
+         → THEN <code>${esc(S.res.meta.target)} = ${esc(r.then)}</code>
          <div class="meta">支持度 n=${r.support}（${pct(r.support / S.res.meta.usedRows)}）· 置信度 ${pct(r.confidence)} · 分布 ${r.distribution.join('/')}</div>` }));
     });
   }
@@ -1063,17 +1177,17 @@
         .sort((a, b2) => Math.abs(b2.weight) - Math.abs(a.weight));
       let box = document.getElementById('nodeInfo');
       if (!box) { box = el('div', { class: 'node-info', id: 'nodeInfo' }); pane.appendChild(box); }
-      box.innerHTML = `<b>${id}</b> · 度 ${n.degree} · 强度 ${n.strength.toFixed(3)}<br>` +
+      box.innerHTML = `<b>${esc(id)}</b> · 度 ${n.degree} · 强度 ${n.strength.toFixed(3)}<br>` +
         rel.map(e => {
           const other = e.source === id ? e.target : e.source;
-          return `<span class="muted">${other}</span> r = ${e.weight.toFixed(3)}`;
+          return `<span class="muted">${esc(other)}</span> r = ${e.weight.toFixed(3)}`;
         }).join('<br>');
     }
 
     const tb = el('table');
     tb.appendChild(el('thead', { html: '<tr><th>节点</th><th>度</th><th>关联强度</th></tr>' }));
     const b = el('tbody');
-    net.nodes.forEach(n => b.appendChild(el('tr', { html: `<td>${n.id}</td><td>${n.degree}</td><td>${n.strength.toFixed(3)}</td>` })));
+    net.nodes.forEach(n => b.appendChild(el('tr', { html: `<td>${esc(n.id)}</td><td>${n.degree}</td><td>${n.strength.toFixed(3)}</td>` })));
     tb.appendChild(b);
     pane.appendChild(el('h3', { text: '节点中心性', style: 'margin-top:16px' }));
     pane.appendChild(tb);
@@ -1142,7 +1256,7 @@
         const color = isMax ? '#34d399' : isMin ? '#ef4444' : '#dfe9f3';
         return `<td style="color:${color};font-weight:${isMax || isMin ? 600 : 400}">${(v * 100).toFixed(1)}%</td>`;
       }).join('');
-      b.appendChild(el('tr', { html: `<td>${f}</td>${cells}<td>${(spread * 100).toFixed(1)} pp</td>` }));
+      b.appendChild(el('tr', { html: `<td>${esc(f)}</td>${cells}<td>${(spread * 100).toFixed(1)} pp</td>` }));
     });
     tb.appendChild(b);
     pane.appendChild(tb);
@@ -1328,10 +1442,35 @@
     if (/\b5\d\d\b/.test(m)) return '服务端错误，稍后再试。';
     return '未知错误，看下面的原始信息。';
   }
+  const AI_SESSION = 'dac-workbench-ai-session';
+  /**
+   * 读取配置：会话存储优先。
+   * 注意：localStorage / sessionStorage 都不是密钥保险箱，只能防"顺手翻看"，
+   * 无法防同源 XSS 或本机恶意程序。界面必须如实告知。
+   */
   function aiCfg() {
-    try { return JSON.parse(localStorage.getItem(AI_KEY) || '{}'); } catch (e) { return {}; }
+    try {
+      const sess = sessionStorage.getItem(AI_SESSION);
+      if (sess) return JSON.parse(sess);
+      return JSON.parse(localStorage.getItem(AI_KEY) || '{}');
+    } catch (e) { return {}; }
   }
-  function aiSave(c) { localStorage.setItem(AI_KEY, JSON.stringify(c)); }
+  function aiSave(c) {
+    try {
+      if (c.persist) {
+        localStorage.setItem(AI_KEY, JSON.stringify(c));
+        sessionStorage.removeItem(AI_SESSION);
+      } else {
+        sessionStorage.setItem(AI_SESSION, JSON.stringify(c));
+        localStorage.removeItem(AI_KEY);
+      }
+    } catch (e) { /* 隐私模式下可能失败 */ }
+  }
+  function maskKey(k) {
+    if (!k) return '（未设置）';
+    if (k.length <= 10) return '****';
+    return k.slice(0, 4) + '…' + k.slice(-4) + `（长度 ${k.length}）`;
+  }
 
   async function callLLM(messages) {
     const c = aiCfg();
@@ -1436,11 +1575,22 @@
     const saveRow = el('div', { style: 'display:flex;gap:8px;margin-top:9px' });
     const bSave = el('button', { class: 'mini', text: '保存设置' });
     bSave.onclick = () => {
-      aiSave({ provider: selP.value, baseURL: inBase.value.trim(), model: inModel.value.trim(), key: inKey.value.trim() });
-      toast('已保存到本地浏览器');
+      aiSave({ provider: selP.value, baseURL: inBase.value.trim(), model: inModel.value.trim(),
+               key: inKey.value.trim(), persist: persistChk.checked });
+      toast(persistChk.checked ? '已保存到 localStorage（长期）' : '已保存到当前会话（关闭页面即失效）');
     };
     const bClear = el('button', { class: 'ghost mini', text: '清除 Key' });
     bClear.onclick = () => { aiSave({}); toast('已清除'); renderAI(); };
+    const persistChk = el('input', { type: 'checkbox' });
+    persistChk.checked = !!cfg.persist;
+    const persistRow = el('label', { class: 'row', style: 'justify-content:flex-start;gap:8px;margin-top:6px' }, [
+      persistChk,
+      el('span', { text: '记住 Key（写入 localStorage，下次打开仍在）' })
+    ]);
+    const riskHint = el('div', { class: 'hint', style: 'border-color:#5a4a1a;color:#f5c66b', html:
+      '<b>安全提示</b>：浏览器存储<b>不是密钥保险箱</b> —— 同源脚本、浏览器扩展、本机恶意程序都能读到。' +
+      '不勾选时 Key 只存在于当前标签页会话，关闭页面即消失。' });
+
     const bTest = el('button', { class: 'ghost mini', text: '测试连接' });
     const testOut = el('div', { class: 'hint', style: 'display:none' });
     bTest.onclick = async () => {
@@ -1448,7 +1598,8 @@
       bTest.textContent = '测试中…';
       testOut.style.display = '';
       testOut.innerHTML = '正在请求…';
-      aiSave({ provider: selP.value, baseURL: inBase.value.trim(), model: inModel.value.trim(), key: inKey.value.trim() });
+      aiSave({ provider: selP.value, baseURL: inBase.value.trim(), model: inModel.value.trim(),
+               key: inKey.value.trim(), persist: persistChk.checked });
       const t0 = performance.now();
       try {
         const txt = await callLLM([{ role: 'user', content: '只回复两个字：可用' }]);
@@ -1465,13 +1616,39 @@
       bTest.textContent = '测试连接';
     };
     saveRow.appendChild(bSave); saveRow.appendChild(bTest); saveRow.appendChild(bClear);
-    if (cfg.key) saveRow.appendChild(el('span', { class: 'chip', text: '已配置 · ' + (cfg.model || '') }));
+    if (cfg.key) saveRow.appendChild(el('span', { class: 'chip', text: maskKey(cfg.key) }));
     box.appendChild(saveRow);
+    box.appendChild(persistRow);
+    box.appendChild(riskHint);
     box.appendChild(testOut);
     pane.appendChild(box);
 
+    // 发送前预览：让用户先看清要把什么发给第三方
+    const preview = el('div', { class: 'hint', style: 'display:none' });
+    const bPreview = el('button', { class: 'ghost mini', text: '👁 预览将发送的内容' });
+    bPreview.onclick = () => {
+      const payload = JSON.stringify({
+        target: r.meta.target, factors: r.meta.factors,
+        rows: r.meta.rows, used: r.meta.usedRows, params: r.meta.params,
+        silhouette: r.scenarios.silhouette,
+        cv: r.tree.cv ? { mean: r.tree.cv.mean, std: r.tree.cv.std } : null,
+        accuracy: r.tree.accuracy,
+        importances: r.tree.importances.slice(0, 5),
+        rules: r.tree.rules.slice(0, 3).map(x => ({ if: x.conditions, then: x.then, n: x.support, conf: x.confidence })),
+        sens: (r.sens || []).map(({ f, rows }) => ({ var: f, probs: rows.map(x => +(x.posterior[x.posterior.length - 1] * 100).toFixed(1)) }))
+      }, null, 1);
+      preview.style.display = '';
+      preview.innerHTML = '';
+      preview.appendChild(el('div', { style: 'margin-bottom:6px', html:
+        '<b>即将发送给 ' + esc((aiCfg().baseURL || 'API 服务商')) + '</b>　' +
+        '<span class="muted">仅含聚合统计量，<b>不含</b>原始行数据、不含缺失值明细</span>' }));
+      preview.appendChild(el('pre', { style: 'max-height:220px;font-size:11px', text: payload }));
+    };
+
     // 操作
     const acts = el('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin:14px 0' });
+    acts.appendChild(bPreview);
+    acts.appendChild(preview);
     const out = el('div', { class: 'ai-msg', text: '点上面的按钮试试。没有 Key 也能用「本地模板」。' });
     const mk = (label, fn) => { const b = el('button', { class: 'mini', text: label }); b.onclick = () => fn(b, out); return b; };
 
@@ -1667,6 +1844,20 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
   }
 
   /* ---------------- 启动 ---------------- */
+  /* Worker 状态显示 + 取消按钮 */
+  (function initWorkerUI() {
+    const badge = document.getElementById('sb-worker');
+    if (!badge) return;
+    if (!WK.supported) {
+      badge.textContent = '不可用（降级主线程）';
+      badge.style.color = '#f59e0b';
+    } else {
+      try { WK.ensure(); badge.textContent = '已启用'; } catch (e) { badge.textContent = '初始化失败'; }
+    }
+    const cancel = document.getElementById('sb-cancel');
+    if (cancel) cancel.onclick = () => { WK.cancelAll(); setBusy(false, '已取消'); cancel.style.display = 'none'; };
+  })();
+
   renderGuide();
   const Q = new URLSearchParams(location.search);
   if (Q.has('demo') || location.hash === '#demo' || Q.has('auto')) {
