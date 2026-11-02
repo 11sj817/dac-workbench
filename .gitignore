@@ -11,3 +11,10 @@ tunnel.log
 public-link.txt
 workbench/_dom*.html
 workbench/_test.js
+workbench/_*.js
+workbench/_*.json
+workbench/_*.html
+workbench/_*.txt
+_*.py
+.chrome-live/
+
