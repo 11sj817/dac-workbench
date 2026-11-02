@@ -153,6 +153,24 @@ const TASKS = {
     };
   },
 
+  /* 广义线性模型拟合 */
+  glmFit(payload, onProgress) {
+    const G = self.DACGLM;
+    if (!G) throw new Error('缺少 DACGLM 模块');
+    onProgress(30);
+    const res = G.fit(payload);
+    onProgress(100);
+    // 去掉大数组，减少结构化克隆开销
+    return Object.assign({}, res, {
+      mu: res.mu ? res.mu.map(v => +v.toFixed(6)) : null,
+      diagnostics: res.diagnostics ? Object.assign({}, res.diagnostics, {
+        resid: res.diagnostics.resid.map(v => +v.toFixed(6)),
+        pearsonResid: res.diagnostics.pearsonResid.map(v => +v.toFixed(6)),
+        devResid: res.diagnostics.devResid.map(v => +v.toFixed(6))
+      }) : null
+    });
+  },
+
   /* Bootstrap 稳定性（聚类 / 规则 / 网络） */
   bootstrapStability(payload, onProgress) {
     const B = self.DACBootstrap;
