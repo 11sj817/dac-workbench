@@ -1,0 +1,11 @@
+DAC Workbench 公网访问
+======================
+工作台  : https://memories-machine-fruit-airline.trycloudflare.com/
+研究报告: https://memories-machine-fruit-airline.trycloudflare.com/report.html
+本地    : http://127.0.0.1:8788/index.html
+
+功能：数据体检 / 相关性 / 云模型校准 / 异质性分型(PCA+肘部) /
+      组合规则(人话+CV) / 相关网络 / 贝叶斯网络+敏感度 / 稳健性检验 / 报告导出
+全部计算在浏览器本地完成，数据不上传。
+隧道：cloudflared quick tunnel（重启失效，域名会变）
+更新时间: 2026-11-02 15:37:42
