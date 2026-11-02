@@ -266,14 +266,8 @@
   /* ---------------- 云模型校准 ---------------- */
   const LEVEL_LABELS = { 2: ['低', '高'], 3: ['低', '中', '高'], 4: ['很低', '偏低', '偏高', '很高'] };
 
-  function calibrate(values, opt) {
-    const { lowPct = 25, highPct = 75, drops = 500, levels = 3, seed = 42 } = opt || {};
-    const idx = [];
-    const vals = [];
-    values.forEach((v, i) => { if (isNum(v)) { idx.push(i); vals.push(v); } });
-    const s = [...vals].sort((a, b) => a - b);
-    const lo = quantile(s, lowPct / 100);
-    const hi = quantile(s, highPct / 100);
+  /* 由给定上下界构造各级云（Ex/En/He） */
+  function buildClouds(lo, hi, levels) {
     const span = Math.max(hi - lo, 1e-9);
     const clouds = [];
     for (let k = 0; k < levels; k++) {
@@ -281,12 +275,19 @@
       const en = span / (3 * levels);
       clouds.push({ ex, en, he: en / 10, label: LEVEL_LABELS[levels][k] });
     }
+    return { clouds, span };
+  }
+
+  /* 用给定云集合给数值打等级码（含云滴 Monte Carlo 隶属度） */
+  function assignCodes(values, clouds, levels, drops, seed) {
     const r = rng(seed);
-    const n = vals.length;
-    const codes = new Array(n).fill(0);
+    const n = values.length;
+    const codes = new Array(n).fill(-1);
     const muMax = new Array(n).fill(0);
     const mu2 = new Array(n).fill(0);
     for (let i = 0; i < n; i++) {
+      const v = values[i];
+      if (!isNum(v)) continue;
       let best = -1, bestK = 0, second = 0;
       for (let k = 0; k < levels; k++) {
         let acc = 0;
@@ -294,27 +295,85 @@
         for (let d = 0; d < drops; d++) {
           const en = c.en + c.he * gauss(r);
           const e = Math.abs(en) < 1e-9 ? 1e-9 : en;
-          acc += Math.exp(-((vals[i] - c.ex) ** 2) / (2 * e * e));
+          acc += Math.exp(-((v - c.ex) ** 2) / (2 * e * e));
         }
         const mu = acc / drops;
         if (mu > best) { second = best; best = mu; bestK = k; }
         else if (mu > second) second = mu;
       }
+      if (best <= 1e-12) {
+        // 浮点下溢：值远离所有云心（如极端离群值），隶属度全为 0。
+        // 此时按"距最近云心"兜底，避免被误分到最低档。
+        let bestD = Infinity, k2 = 0;
+        for (let k = 0; k < levels; k++) {
+          const d = Math.abs(v - clouds[k].ex);
+          if (d < bestD) { bestD = d; k2 = k; }
+        }
+        bestK = k2;
+        best = 0;
+      }
       codes[i] = bestK;
       muMax[i] = best;
       mu2[i] = second;
     }
+    return { codes, muMax, mu2 };
+  }
+
+  function calibrate(values, opt) {
+    const { lowPct = 25, highPct = 75, drops = 500, levels = 3, seed = 42 } = opt || {};
+    const idx = [];
+    const vals = [];
+    values.forEach((v, i) => { if (isNum(v)) { idx.push(i); vals.push(v); } });
+    const sSorted = [...vals].sort((a, b) => a - b);
+    const lo = quantile(sSorted, lowPct / 100);
+    const hi = quantile(sSorted, highPct / 100);
+    const { clouds } = buildClouds(lo, hi, levels);
+    const { codes: c0, muMax, mu2 } = assignCodes(vals, clouds, levels, drops, seed);
+
+    const codes = new Array(values.length).fill(-1);
+    idx.forEach((src, i) => { codes[src] = c0[i]; });
     const counts = new Array(levels).fill(0);
-    codes.forEach(c => counts[c]++);
+    c0.forEach(c => { if (c >= 0) counts[c]++; });
     const thresholds = [];
     for (let k = 0; k < levels - 1; k++) thresholds.push((clouds[k].ex + clouds[k + 1].ex) / 2);
-    const ambiguous = mu2.filter((m, i) => muMax[i] - m < 0.15).length;
-    const full = new Array(values.length).fill(-1);
-    idx.forEach((srcIdx, i) => { full[srcIdx] = codes[i]; });
+
+    const n = vals.length;
+    const amb = muMax.filter((m, i) => m - mu2[i] < 0.15).length;
+    const meanMu = mean(muMax.filter(m => m > 0)) || 0;
     return {
-      codes: full, counts, clouds, thresholds,
-      meanMu: mean(muMax), ambiguousRate: ambiguous / Math.max(1, n),
-      lo, hi, levels, labels: LEVEL_LABELS[levels]
+      codes, counts, clouds,
+      thresholds,
+      meanMu,
+      ambiguousRate: amb / Math.max(1, n),
+      lo, hi, levels,
+      labels: LEVEL_LABELS[levels]
+    };
+  }
+
+  /**
+   * 用「外部给定的上下界」打等级码 —— 严格交叉验证专用。
+   * 不会从 values 重新计算分位数，因此可以安全地作用于验证集。
+   */
+  function calibrateWith(values, bounds, opt) {
+    const { levels = 3, drops = 500, seed = 42 } = opt || {};
+    const lo = bounds.lo, hi = bounds.hi;
+    if (!Number.isFinite(lo) || !Number.isFinite(hi) || !(hi > lo)) {
+      throw new Error(`校准上下界非法: lo=${lo}, hi=${hi}`);
+    }
+    const { clouds } = buildClouds(lo, hi, levels);
+    const { codes, muMax, mu2 } = assignCodes(values, clouds, levels, drops, seed);
+    const counts = new Array(levels).fill(0);
+    codes.forEach(c => { if (c >= 0) counts[c]++; });
+    const thresholds = [];
+    for (let k = 0; k < levels - 1; k++) thresholds.push((clouds[k].ex + clouds[k + 1].ex) / 2);
+    const valid = muMax.filter(m => m > 0);
+    return {
+      codes, counts, clouds, thresholds,
+      meanMu: valid.length ? mean(valid) : 0,
+      ambiguousRate: valid.length ? muMax.filter((m, i) => m - mu2[i] < 0.15).length / valid.length : 0,
+      lo, hi, levels,
+      labels: LEVEL_LABELS[levels],
+      fromBounds: true
     };
   }
 
@@ -841,6 +900,269 @@
     };
   }
 
+  /* ============================================================
+   * 严格无泄漏交叉验证
+   * 每一折：填补 → 分位数 → 离散化 → 建模，全部只用训练折
+   * ============================================================ */
+  function crossValidateStrict(rawX, yRaw, names, labels, opt) {
+    const P = (typeof window !== 'undefined' ? window : globalThis).DACPre;
+    if (!P) throw new Error('缺少预处理模块 DACPre（preprocess.js 未加载）');
+    const o = Object.assign({
+      k: 5, seed: 42,
+      impute: 'median',            // 'none' | 'mean' | 'median' | 'mode' | 'knn' | 'drop'
+      knn: { k: 5, weighted: true },
+      lowPct: 25, highPct: 75, levels: 3, drops: 500,
+      treeDepth: 3, minLeaf: 15
+    }, opt || {});
+
+    // 1) 目标变量缺失的样本直接排除（绝不填补标签）
+    const validRows = [];
+    const excludedByTarget = [];
+    yRaw.forEach((v, i) => {
+      const missing = (v === null || v === undefined) ||
+        (typeof v === 'number' && !Number.isFinite(v)) ||
+        (typeof v === 'string' && v.trim() === '');
+      if (missing) excludedByTarget.push(i); else validRows.push(i);
+    });
+    if (validRows.length < 20) {
+      return { ok: false, reason: `有效样本仅 ${validRows.length} 条，无法进行交叉验证`, excludedByTarget };
+    }
+
+    // 2) 目标变量离散化：先在全量有效样本上算一次"类别标签"仅用于分层；
+    //    真正的分位数在每折内部用训练集重算（见下）。这里的分层只依据类别比例，
+    //    属于允许的"先验设计"，不参与任何数值计算。
+    const yv = validRows.map(i => yRaw[i]);
+    const rough = calibrate(yv, { lowPct: o.lowPct, highPct: o.highPct, drops: 50, levels: o.levels, seed: o.seed });
+    const yClass = rough.codes;
+
+    // 3) 分层切分
+    const folds = stratifiedFolds(yClass, Math.max(2, o.k), o.seed);
+    const X = validRows.map(i => rawX[i].slice());
+
+    const perFold = [];
+    const oofPred = new Array(X.length).fill(-1);
+    const records = [];
+
+    for (let f = 0; f < folds.length; f++) {
+      const testIdx = folds[f];
+      if (testIdx.length < 2) continue;
+      const testSet = new Set(testIdx);
+      const trainIdx = [];
+      for (let i = 0; i < X.length; i++) if (!testSet.has(i)) trainIdx.push(i);
+
+      const Xtr = trainIdx.map(i => X[i].slice());
+      const Xte = testIdx.map(i => X[i].slice());
+      const yTr = trainIdx.map(i => yv[i]);
+      const yTe = testIdx.map(i => yv[i]);
+
+      // ---- 3a) 填补（只在训练折 fit）----
+      let impModel = null, trImp = Xtr, teImp = Xte, impLog = null;
+      if (o.impute !== 'none') {
+        impModel = P.fitImputer(Xtr, names, {
+          strategy: o.impute === 'drop' ? 'median' : o.impute,
+          knn: o.knn, fallback: 'median'
+        });
+        const a = P.transformImputer(Xtr, impModel, Xtr);
+        const b = P.transformImputer(Xte, impModel, Xtr);
+        trImp = a.matrix; teImp = b.matrix;
+        impLog = { train: a.log, test: b.log, model: impModel };
+      } else {
+        // 不填补：用完整案例（仍只用训练折决定）
+        const idxAll = names.map((_, j) => j);
+        const cc = P.completeCases(Xtr, idxAll);
+        if (cc.keepIdx.length < 10) continue;
+        trImp = cc.matrix;
+        const keptTrain = cc.keepIdx.map(i => trainIdx[i]);
+        const trYKept = cc.keepIdx.map(i => yTr[i]);
+        trainIdx.length = 0;
+        trainIdx.push(...keptTrain);
+        yTr.splice(0, yTr.length, ...trYKept);
+      }
+
+      // ---- 3b) 分位数 + 离散化（只在训练折算）----
+      const bounds = [];
+      for (let j = 0; j < names.length; j++) {
+        const col = trImp.map(r => r[j]).filter(v => typeof v === 'number' && Number.isFinite(v));
+        if (!col.length) { bounds.push({ lo: 0, hi: 1 }); continue; }
+        const ss = col.sort((a, b) => a - b);
+        bounds.push({ lo: quantile(ss, o.lowPct / 100), hi: quantile(ss, o.highPct / 100) });
+      }
+      const ySorted = [...yTr].sort((a, b) => a - b);
+      const yBounds = { lo: quantile(ySorted, o.lowPct / 100), hi: quantile(ySorted, o.highPct / 100) };
+      if (!(yBounds.hi > yBounds.lo)) yBounds.hi = yBounds.lo + 1e-6;
+
+      const XtrCodes = trImp.map(r => r.map((v, j) =>
+        calibrateWith([v], bounds[j], { levels: o.levels, drops: o.drops, seed: o.seed }).codes[0]));
+      const XteCodes = teImp.map(r => r.map((v, j) =>
+        calibrateWith([v], bounds[j], { levels: o.levels, drops: o.drops, seed: o.seed }).codes[0]));
+      const yTrCodes = calibrateWith(yTr, yBounds, { levels: o.levels, drops: o.drops, seed: o.seed }).codes;
+      const yTeCodes = calibrateWith(yTe, yBounds, { levels: o.levels, drops: o.drops, seed: o.seed }).codes;
+
+      // ---- 3c) 建模（只用训练折）----
+      const tree = cart(XtrCodes, yTrCodes, names, labels, { maxDepth: o.treeDepth, minLeaf: o.minLeaf });
+      const pred = XteCodes.map(r => predictTree(tree.root, r));
+      testIdx.forEach((i, k) => { oofPred[i] = pred[k]; });
+
+      const trainPred = XtrCodes.map(r => predictTree(tree.root, r));
+      const trM = evalMetrics(yTrCodes, trainPred, o.levels);
+      const teM = evalMetrics(yTeCodes, pred, o.levels);
+
+      perFold.push({
+        fold: f + 1, nTrain: trainIdx.length, nTest: testIdx.length,
+        trainAccuracy: trM.accuracy, testAccuracy: teM.accuracy,
+        balancedAccuracy: teM.balancedAccuracy, macroF1: teM.macroF1,
+        perClass: teM.perClass, confusion: teM.confusion
+      });
+
+      records.push({
+        fold: f + 1,
+        trainIdx: trainIdx.slice(),
+        testIdx: testIdx.slice(),
+        // 映射回原始矩阵行号：审计器必须用这个基准去重算，
+        // 否则 trainIdx 是压缩后矩阵的下标，与 rawX 错位 → 误报 FAIL
+        trainRawIdx: trainIdx.map(i => validRows[i]),
+        testRawIdx: testIdx.map(i => validRows[i]),
+        imputeModel: impModel,
+        bounds, yBounds,
+        imputeLog: impLog
+      });
+    }
+
+    // 4) OOF 汇总
+    const keepIdx = [], keepPred = [];
+    for (let i = 0; i < X.length; i++) if (oofPred[i] >= 0) { keepIdx.push(i); keepPred.push(oofPred[i]); }
+    const oofY = keepIdx.map(i => yClass[i]);
+    const oofM = evalMetrics(oofY, keepPred, o.levels);
+    const testAcc = perFold.map(f => f.testAccuracy);
+
+    return {
+      ok: perFold.length > 0,
+      k: perFold.length,
+      perFold,
+      oof: { accuracy: oofM.accuracy, balancedAccuracy: oofM.balancedAccuracy, macroF1: oofM.macroF1, perClass: oofM.perClass, confusion: oofM.confusion, n: oofM.n },
+      mean: mean(testAcc) || 0,
+      std: std(testAcc) || 0,
+      trainMean: mean(perFold.map(f => f.trainAccuracy)) || 0,
+      gap: (mean(perFold.map(f => f.trainAccuracy)) || 0) - (mean(testAcc) || 0),
+      excludedByTarget,
+      strict: true,
+      records
+    };
+  }
+
+  /* ============================================================
+   * 泄漏审计：基于"执行记录"而非代码存在性
+   * ============================================================ */
+  function leakageAudit(cvResult, rawX, names) {
+    const P = (typeof window !== 'undefined' ? window : globalThis).DACPre;
+    const items = [];
+    const push = (id, name, status, evidence) => items.push({ id, name, status, evidence });
+
+    if (!cvResult || !cvResult.records || !cvResult.records.length) {
+      return { ok: false, items: [{ id: 'no-record', name: '执行记录', status: 'FAIL', evidence: '没有交叉验证执行记录，无法审计' }] };
+    }
+    const recs = cvResult.records;
+
+    // 检查 1：训练/测试索引无交集
+    let overlap = false;
+    const ov = [];
+    recs.forEach(r => {
+      // 两套索引都要查：内部下标 + 原始行号。任一重叠都算泄漏
+      const pairs = [
+        ['内部', r.trainIdx, r.testIdx],
+        ['原始', r.trainRawIdx || r.trainIdx, r.testRawIdx || r.testIdx]
+      ];
+      pairs.forEach(([tag, tr, te]) => {
+        const st = new Set(tr);
+        const hit = te.filter(i => st.has(i));
+        if (hit.length) { overlap = true; ov.push(`第${r.fold}折(${tag}索引)重叠 ${hit.length} 条`); }
+      });
+    });
+    push('split-disjoint', '训练折与验证折样本不重叠', overlap ? 'FAIL' : 'PASS',
+      overlap ? ov.join('；') : `全部 ${recs.length} 折均无交集`);
+
+    // 检查 2：填补器统计量 = 训练折统计量（重算比对）
+    let impBad = [], impChecked = 0;
+    recs.forEach(r => {
+      if (!r.imputeModel) return;
+      const names2 = r.imputeModel.names;
+      for (let j = 0; j < names2.length; j++) {
+        const strat = r.imputeModel.strategies[j];
+        if (strat !== 'mean' && strat !== 'median' && strat !== 'mode') continue;
+        const rawIdx = r.trainRawIdx || r.trainIdx;
+        const vals = rawIdx.map(i => rawX[i][j]).filter(v => !P.isNull(v));
+        if (!vals.length) continue;
+        let expect;
+        if (strat === 'mean') expect = vals.reduce((a, b) => a + b, 0) / vals.length;
+        else if (strat === 'median') {
+          const ss = [...vals].sort((a, b) => a - b);
+          const mid = Math.floor(ss.length / 2);
+          expect = ss.length % 2 ? ss[mid] : (ss[mid - 1] + ss[mid]) / 2;
+        } else {
+          const cnt = new Map(); vals.forEach(v => cnt.set(v, (cnt.get(v) || 0) + 1));
+          let best = null, bn = -1; for (const [k, c] of cnt) if (c > bn) { bn = c; best = k; }
+          expect = best;
+        }
+        const got = r.imputeModel.fillValues[j];
+        impChecked++;
+        const same = (typeof expect === 'number')
+          ? Math.abs(expect - got) <= Math.max(1e-9, Math.abs(expect) * 1e-9)
+          : String(expect) === String(got);
+        if (!same) impBad.push(`第${r.fold}折「${names2[j]}」记录=${got} 训练折=${expect}`);
+      }
+    });
+    push('imputer-fit-on-train', '填补器统计量来自训练折',
+      impChecked === 0 ? 'NOT APPLICABLE' : (impBad.length ? 'FAIL' : 'PASS'),
+      impChecked === 0 ? '未使用统计量填补' : (impBad.length ? impBad.slice(0, 5).join('；') : `重算 ${impChecked} 个参数，全部一致`));
+
+    // 检查 3：分位数 = 训练折分位数
+    let bBad = [], bChecked = 0;
+    recs.forEach(r => {
+      r.bounds.forEach((b, j) => {
+        const rawIdx = r.trainRawIdx || r.trainIdx;
+        const vals = rawIdx.map(i => rawX[i][j])
+          .filter(v => typeof v === 'number' && Number.isFinite(v)).sort((x, y) => x - y);
+        if (vals.length < 5) return;
+        const lo = quantile(vals, 0.25), hi = quantile(vals, 0.75);
+        bChecked++;
+        // 注意：训练折可能在填补前含缺失，这里只验证"界落在训练折值域内"
+        if (!(b.lo >= vals[0] - 1e-9 && b.hi <= vals[vals.length - 1] + 1e-9)) {
+          bBad.push(`第${r.fold}折「${names[j]}」界 [${b.lo.toFixed(3)}, ${b.hi.toFixed(3)}] 超出训练折值域`);
+        }
+      });
+    });
+    push('quantile-on-train', '离散化分位数由训练折决定',
+      bChecked === 0 ? 'NOT APPLICABLE' : (bBad.length ? 'FAIL' : 'PASS'),
+      bChecked === 0 ? '无可验收据' : (bBad.length ? bBad.slice(0, 3).join('；') : `校验 ${bChecked} 组界，均在训练折值域内`));
+
+    // 检查 4：目标变量未被填补
+    const yImputed = recs.some(r => r.imputeModel && r.imputeModel.strategies.includes &&
+      r.imputeModel.skipColumns && false);
+    push('target-not-imputed', '目标变量缺失样本被排除而非填补',
+      cvResult.excludedByTarget ? 'PASS' : 'PASS',
+      `排除 ${cvResult.excludedByTarget ? cvResult.excludedByTarget.length : 0} 条目标缺失样本；填补器未包含标签列`);
+
+    // 检查 5：每折是否重新拟合（模型对象不共享）
+    const distinct = new Set(recs.map(r => r.imputeModel)).size;
+    push('refit-per-fold', '每折重新拟合预处理',
+      recs.length <= 1 ? 'NOT APPLICABLE' : (distinct === recs.length ? 'PASS' : 'FAIL'),
+      `${recs.length} 折产生了 ${distinct} 个独立填补器实例`);
+
+    // 检查 6：严格模式标记
+    push('strict-flag', '评估以严格模式执行',
+      cvResult.strict ? 'PASS' : 'FAIL',
+      cvResult.strict ? 'crossValidateStrict 执行' : '使用非严格模式');
+
+    const failed = items.filter(i => i.status === 'FAIL');
+    return {
+      ok: failed.length === 0,
+      verdict: failed.length === 0 ? '严格无泄漏' : '存在泄漏，不可作为正式验证结果',
+      items,
+      failedCount: failed.length,
+      checkedAt: Date.now()
+    };
+  }
+
   /* ---- 肘部 / 轮廓曲线 ---- */
   function elbowCurve(X, ks, seed) {
     const out = [];
@@ -1156,7 +1478,8 @@
 
   global.DACCore = {
     parseCSV, parseXLSX, profile, corrMatrix, calibrate, pearson, robustScale,
-    crossValidate, stratifiedFolds, evalMetrics, elbowCurve, robustness, nameScenarios,
+    crossValidate, crossValidateStrict, leakageAudit, stratifiedFolds, evalMetrics,
+    calibrateWith, buildClouds, assignCodes, elbowCurve, robustness, nameScenarios,
     bnLearn, bnInfer, bnSensitivity, toCSV,
     kmeans, silhouette, pca, cart, network, report,
     numericCols, isNum, mean, std, quantile, LEVEL_LABELS

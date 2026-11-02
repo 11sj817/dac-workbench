@@ -31,7 +31,8 @@
     columns: [], rows: [], numeric: [],
     target: null, factors: [],
     params: { lowPct: 25, highPct: 75, drops: 500, levels: 3, k: 3, treeDepth: 3, netThreshold: 0.2, seed: 42 },
-    res: null, extra: {}, tab: 'guide', step: 1, busy: false
+    res: null, extra: {}, tab: 'guide', step: 1, busy: false,
+    rowsWork: null, rowsRaw: null
   };
 
   let toastTimer;
@@ -127,6 +128,8 @@
     if (!parsed.columns.length) return toast('文件里没有读到表格');
     S.columns = parsed.columns;
     S.rows = parsed.rows;
+    S.rowsRaw = parsed.rows.map(r => r.slice());
+    S.rowsWork = null;
     S.numeric = C.numericCols(S.columns, S.rows);
     if (S.numeric.length < 2) return toast('至少需要 2 个数值列', 5000);
 
@@ -372,6 +375,7 @@
     switch (S.tab) {
       case 'guide': return renderGuide();
       case 'profile': return renderProfileDirect(S.res ? S.res.profile : C.profile(S.columns, S.rows));
+      case 'quality': return renderQuality();
       case 'corr': return renderCorr();
       case 'calib': return renderCalib();
       case 'scene': return renderScene();
@@ -452,6 +456,316 @@
     if (prof.warnings.length) {
       pane.appendChild(el('h3', { text: '体检提示', style: 'margin-top:16px;color:#f59e0b' }));
       prof.warnings.forEach(w => pane.appendChild(el('div', { class: 'rule', text: w })));
+    }
+  }
+
+
+  /* ---------------- 渲染：数据质量与预处理 ---------------- */
+  const workingRows = () => (S.rowsWork && S.rowsWork.length ? S.rowsWork : S.rows);
+
+  function renderQuality() {
+    const pane = $('#pane');
+    const P = window.DACPre;
+    pane.innerHTML = '';
+    if (!P) { pane.innerHTML = '<div class="muted">预处理模块未加载。</div>'; return; }
+    const WR = workingRows();
+    if (!WR.length) { pane.innerHTML = '<div class="muted">先导入数据。</div>'; return; }
+
+    const names = S.columns;
+    /* WR 已在上方定义 */
+    const diag = P.diagnoseMissing(WR, names);
+    const q = S.extra.quality || (S.extra.quality = {
+      strategy: 'median', knnK: 5, weighted: true, fallback: 'median',
+      k: 5, seed: 42, strict: null, audit: null, preview: null
+    });
+
+    /* --- 顶部指标 --- */
+    pane.appendChild(el('div', { class: 'stat' }, [
+      el('div', { html: `<span>样本 × 变量</span><b>${diag.n} × ${diag.p}</b>` }),
+      el('div', { html: `<span>总缺失率</span><b>${pct(diag.overallRate)}</b>` }),
+      el('div', { html: `<span>完整样本</span><b>${diag.completeRows}</b>` }),
+      el('div', { html: `<span>完全缺失列</span><b>${diag.allMissingCols.length}</b>` })
+    ]));
+
+    const ctrl = el('div', { style: 'display:flex;gap:8px;margin:10px 0;flex-wrap:wrap;align-items:center' });
+    const btnInject = el('button', { class: 'ghost mini', text: '注入 10% 模拟缺失' });
+    btnInject.onclick = () => {
+      let a = (q.seed || 42) >>> 0;
+      const rnd = () => { a = (a + 0x6D2B79F5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+      const base = S.rowsRaw || S.rows;
+      const rows = base.map(r => r.slice());
+      let cnt = 0;
+      S.numeric.forEach(name => {
+        const j = S.columns.indexOf(name);
+        if (j < 0) return;
+        for (let i = 0; i < rows.length; i++) {
+          if (rnd() < 0.10) { rows[i][j] = null; cnt++; }
+        }
+      });
+      S.rowsWork = rows;
+      q.preview = null; q.strict = null; q.audit = null;
+      toast('已注入 ' + cnt + ' 个缺失单元格（仅影响本页演示）');
+      renderQuality();
+    };
+    ctrl.appendChild(btnInject);
+    if (S.rowsWork) {
+      const btnRestore = el('button', { class: 'ghost mini', text: '恢复原始数据' });
+      btnRestore.onclick = () => {
+        S.rowsWork = null;
+        q.preview = null; q.strict = null; q.audit = null;
+        toast('已恢复');
+        renderQuality();
+      };
+      ctrl.appendChild(btnRestore);
+      ctrl.appendChild(el('span', { class: 'pill warn', text: '当前为模拟缺失数据' }));
+    }
+    pane.appendChild(ctrl);
+
+    const warn = [];
+    if (diag.allMissingCols.length) warn.push(`完全缺失列：${diag.allMissingCols.join('、')}`);
+    if (diag.highMissingCols.length) warn.push(`缺失 > 50%：${diag.highMissingCols.join('、')}`);
+    if (diag.completeRows === 0 && diag.totalMissing > 0) warn.push('没有任何完整样本 —— 若选「完整案例删除」会得到空数据集');
+    warn.forEach(w => pane.appendChild(el('div', { class: 'hint', style: 'border-color:#5a4a1a;color:#f5c66b', text: w })));
+
+    /* --- 缺失矩阵 --- */
+    pane.appendChild(el('h3', { text: '缺失矩阵（抽样 ≤200×40，红 = 缺失）', style: 'margin-top:16px' }));
+    const pat = diag.pattern || [];
+    if (!pat.length || !pat[0].length) {
+      pane.appendChild(el('div', { class: 'muted', text: '无数据' }));
+    } else {
+      const cw = Math.max(2, Math.min(8, Math.floor(680 / pat[0].length)));
+      const ch = Math.max(1.5, Math.min(4, Math.floor(220 / pat.length)));
+      const g = mkSvg(pat[0].length * cw + 4, pat.length * ch + 4);
+      pat.forEach((row, i) => {
+        row.forEach((v, j) => {
+          g.appendChild(mkRect(2 + j * cw, 2 + i * ch, cw - 0.5, ch - 0.5, v ? '#ef4444' : '#22313f'));
+        });
+      });
+      pane.appendChild(el('div', { style: 'overflow:auto;max-height:260px' }, [g]));
+    }
+
+    /* --- 各列缺失率 --- */
+    const tb = el('table');
+    tb.appendChild(el('thead', { html: '<tr><th>变量</th><th>缺失</th><th>缺失率</th><th>有效</th><th>状态</th></tr>' }));
+    const bd = el('tbody');
+    diag.perCol.forEach(c => {
+      const st = c.allMissing ? '<span class="pill bad">全缺失</span>'
+        : c.rate > 0.5 ? '<span class="pill warn">高缺失</span>'
+        : c.missing > 0 ? '<span class="pill info">有缺失</span>'
+        : '<span class="pill ok">完整</span>';
+      bd.appendChild(el('tr', { html:
+        `<td>${c.name}</td><td>${c.missing}</td>
+         <td><div class="bar" style="width:90px;display:inline-block;vertical-align:middle">
+           <i style="width:${Math.round(c.rate * 100)}%;background:${c.rate > 0.5 ? '#ef4444' : '#f59e0b'}"></i></div>
+           <span class="muted"> ${pct(c.rate)}</span></td>
+         <td>${c.valid}</td><td>${st}</td>` }));
+    });
+    tb.appendChild(bd);
+    pane.appendChild(el('h3', { text: '各变量缺失情况', style: 'margin-top:16px' }));
+    pane.appendChild(tb);
+
+    /* --- 缺失机制说明 --- */
+    pane.appendChild(el('div', { class: 'rule', style: 'margin-top:14px;border-left-color:#f59e0b;cursor:default', html:
+      '<b>缺失机制</b>：MCAR（完全随机）／MAR（可观测变量可解释）／MNAR（与缺失值本身有关）。<br>' +
+      '<span class="muted">仅凭缺失比例无法判定机制，需要结合研究设计与数据收集过程。本工具不做自动判定。</span>' }));
+
+    /* --- 填补设置 --- */
+    pane.appendChild(el('h3', { text: '填补方案', style: 'margin-top:20px' }));
+    const stratSel = el('select', {});
+    [['median', '中位数填补（推荐，抗异常值）'], ['mean', '均值填补'],
+     ['mode', '众数填补'], ['knn', 'KNN 填补（Gower 距离，支持混合类型）'],
+     ['none', '不填补（仅完整案例）']].forEach(([v, label]) => {
+      const o = el('option', { value: v, text: label });
+      if (q.strategy === v) o.selected = true;
+      stratSel.appendChild(o);
+    });
+    stratSel.onchange = () => { q.strategy = stratSel.value; q.preview = null; renderQuality(); };
+
+    const row1 = el('div', { style: 'display:flex;gap:10px;align-items:center;margin:8px 0;flex-wrap:wrap' }, [
+      el('div', { style: 'flex:1;min-width:220px' }, [el('div', { class: 'muted', text: '策略' }), stratSel])
+    ]);
+
+    const kIn = el('input', { type: 'number', value: q.knnK, min: '1', max: '20' });
+    kIn.onchange = () => { q.knnK = Math.max(1, +kIn.value || 5); q.preview = null; };
+    const wChk = el('input', { type: 'checkbox' });
+    wChk.checked = q.weighted;
+    wChk.onchange = () => { q.weighted = wChk.checked; q.preview = null; };
+    if (q.strategy === 'knn') {
+      row1.appendChild(el('div', { style: 'width:110px' }, [el('div', { class: 'muted', text: 'K 值' }), kIn]));
+      row1.appendChild(el('label', { class: 'row', style: 'width:130px;margin-top:16px' }, [wChk, el('span', { text: '距离加权' })]));
+    }
+    pane.appendChild(row1);
+
+    pane.appendChild(el('div', { class: 'hint', html:
+      '所有填补参数只在<b>训练折</b>上拟合，验证折仅做 transform。目标变量缺失样本<b>直接排除</b>，绝不用均值填补标签。' }));
+
+    /* --- 预览 --- */
+    const previewBox = el('div', { style: 'margin-top:10px' });
+    const btnPrev = el('button', { class: 'mini', text: '预览填补效果（不改变数据）' });
+    btnPrev.onclick = () => {
+      btnPrev.disabled = true;
+      setTimeout(() => {
+        try {
+          const numIdx = names.map((n, j) => j).filter(j => S.numeric.includes(names[j]));
+          const types = numIdx.map(j => P.inferType(WR.map(r => r[j]), { name: names[j] }));
+          const model = P.fitImputer(WR, names, {
+            strategy: q.strategy === 'none' ? 'median' : q.strategy,
+            knn: { k: q.knnK, weighted: q.weighted }, fallback: q.fallback
+          });
+          const out = P.transformImputer(WR, model, S.rows);
+          const after = P.diagnoseMissing(out.matrix, names);
+          q.preview = {
+            model,
+            beforeRate: diag.overallRate, afterRate: after.overallRate,
+            filled: out.log.filledPerColumn.reduce((a, b) => a + b, 0),
+            fallbacks: out.log.fallbackReasons.length,
+            perCol: out.log.filledPerColumn,
+            strategies: model.strategies.slice()
+          };
+        } catch (e) { q.preview = { error: e.message }; }
+        btnPrev.disabled = false;
+        renderQuality();
+      }, 20);
+    };
+    previewBox.appendChild(btnPrev);
+    if (q.preview) {
+      if (q.preview.error) {
+        previewBox.appendChild(el('div', { class: 'hint', style: 'border-color:#5a2020;color:#fca5a5', text: '填补失败：' + q.preview.error }));
+      } else {
+        const pv = q.preview;
+        previewBox.appendChild(el('div', { class: 'stat', style: 'margin-top:10px' }, [
+          el('div', { html: `<span>缺失率 前→后</span><b>${pct(pv.beforeRate)} → ${pct(pv.afterRate)}</b>` }),
+          el('div', { html: `<span>填补单元格</span><b>${pv.filled}</b>` }),
+          el('div', { html: `<span>回退次数</span><b>${pv.fallbacks}</b>` })
+        ]));
+        const tb2 = el('table');
+        tb2.appendChild(el('thead', { html: '<tr><th>变量</th><th>策略</th><th>填补数</th><th>填补值</th></tr>' }));
+        const b2 = el('tbody');
+        names.forEach((n, j) => {
+          if (!pv.perCol[j]) return;
+          const fill = pv.model.fillValues[j];
+          b2.appendChild(el('tr', { html:
+            `<td>${n}</td><td>${pv.strategies[j]}</td><td>${pv.perCol[j]}</td>
+             <td>${fill === null ? '-' : fmt(fill, 3)}</td>` }));
+        });
+        tb2.appendChild(b2);
+        previewBox.appendChild(tb2);
+      }
+    }
+    pane.appendChild(previewBox);
+
+    /* --- 严格无泄漏 CV --- */
+    pane.appendChild(el('h3', { text: '严格无泄漏交叉验证', style: 'margin-top:24px' }));
+    pane.appendChild(el('div', { class: 'muted', html:
+      '每折内部：填补 → 分位数 → 离散化 → 建模，全部只用训练折；验证折只做 transform。' }));
+
+    const kv = el('input', { type: 'number', value: q.k, min: '2', max: '10' });
+    kv.onchange = () => { q.k = Math.max(2, +kv.value || 5); };
+    const sv = el('input', { type: 'number', value: q.seed });
+    sv.onchange = () => { q.seed = +sv.value || 42; };
+    pane.appendChild(el('div', { style: 'display:flex;gap:10px;margin:10px 0;flex-wrap:wrap' }, [
+      el('div', { style: 'width:100px' }, [el('div', { class: 'muted', text: '折数 K' }), kv]),
+      el('div', { style: 'width:120px' }, [el('div', { class: 'muted', text: '随机种子' }), sv])
+    ]));
+
+    const btnRun = el('button', { class: 'mini', text: '运行严格 CV + 泄漏审计' });
+    const outBox = el('div', { style: 'margin-top:10px' });
+    btnRun.onclick = () => {
+      btnRun.disabled = true;
+      btnRun.textContent = '计算中…';
+      setTimeout(() => {
+        try {
+          const target = S.target || names[names.length - 1];
+          const idxT = names.indexOf(target);
+          const factorIdx = names.map((n, j) => j).filter(j => j !== idxT && S.numeric.includes(names[j]));
+          if (factorIdx.length < 1) throw new Error('至少需要一个数值型条件变量');
+          const rawX = WR.map(r => factorIdx.map(j => r[j]));
+          const yv = WR.map(r => r[idxT]);
+          const fnames = factorIdx.map(j => names[j]);
+          const levels = S.params.levels || 3;
+          const cv = C.crossValidateStrict(rawX, yv, fnames, C.LEVEL_LABELS[levels], {
+            k: q.k, seed: q.seed,
+            impute: q.strategy, knn: { k: q.knnK, weighted: q.weighted },
+            lowPct: S.params.lowPct || 25, highPct: S.params.highPct || 75,
+            levels, drops: Math.min(400, S.params.drops || 400),
+            treeDepth: S.params.treeDepth || 3,
+            minLeaf: Math.max(10, Math.round(WR.length / 40))
+          });
+          q.strict = cv;
+          q.audit = cv.ok ? C.leakageAudit(cv, rawX, fnames) : null;
+        } catch (e) {
+          q.strict = { ok: false, reason: e.message };
+          q.audit = null;
+        }
+        btnRun.disabled = false;
+        btnRun.textContent = '运行严格 CV + 泄漏审计';
+        renderQuality();
+      }, 20);
+    };
+    outBox.appendChild(btnRun);
+    pane.appendChild(outBox);
+
+    if (q.strict) {
+      const cv = q.strict;
+      if (!cv.ok) {
+        pane.appendChild(el('div', { class: 'hint', style: 'border-color:#5a2020;color:#fca5a5', text: '无法完成：' + cv.reason }));
+      } else {
+        pane.appendChild(el('div', { class: 'stat', style: 'margin-top:14px' }, [
+          el('div', { html: `<span>测试准确率</span><b>${pct(cv.mean)}</b>` }),
+          el('div', { html: `<span>平衡准确率</span><b>${pct(cv.oof.balancedAccuracy)}</b>` }),
+          el('div', { html: `<span>Macro-F1</span><b>${pct(cv.oof.macroF1)}</b>` }),
+          el('div', { html: `<span>训练-测试差距</span><b>${(cv.gap * 100).toFixed(1)} pp</b>` })
+        ]));
+        pane.appendChild(el('div', { class: 'muted', html:
+          `排除目标缺失样本 <b>${cv.excludedByTarget.length}</b> 条；共 ${cv.k} 折。` }));
+
+        const t3 = el('table');
+        t3.appendChild(el('thead', { html:
+          '<tr><th>折</th><th>训练 n</th><th>验证 n</th><th>训练准确率</th><th>验证准确率</th><th>平衡准确率</th><th>Macro-F1</th></tr>' }));
+        const b3 = el('tbody');
+        cv.perFold.forEach(f => b3.appendChild(el('tr', { html:
+          `<td>${f.fold}</td><td>${f.nTrain}</td><td>${f.nTest}</td>
+           <td>${pct(f.trainAccuracy)}</td><td>${pct(f.testAccuracy)}</td>
+           <td>${pct(f.balancedAccuracy)}</td><td>${pct(f.macroF1)}</td>` })));
+        t3.appendChild(b3);
+        pane.appendChild(el('h3', { text: '各折结果（每折独立预处理）', style: 'margin-top:16px' }));
+        pane.appendChild(t3);
+
+        // 混淆矩阵
+        const cm = cv.oof.confusion;
+        const L = C.LEVEL_LABELS[S.params.levels || 3];
+        const t4 = el('table');
+        t4.appendChild(el('thead', { html: '<tr><th>真实 \\ 预测</th>' + L.map(x => `<th>${x}</th>`).join('') + '</tr>' }));
+        const b4 = el('tbody');
+        cm.forEach((row, i) => b4.appendChild(el('tr', { html:
+          `<td>${L[i]}</td>` + row.map((v, j) => `<td style="color:${i === j ? '#34d399' : v ? '#fca5a5' : '#5d7387'}">${v}</td>`).join('') })));
+        t4.appendChild(b4);
+        pane.appendChild(el('h3', { text: '合并混淆矩阵（OOF）', style: 'margin-top:16px' }));
+        pane.appendChild(t4);
+      }
+    }
+
+    /* --- 泄漏审计 --- */
+    if (q.audit) {
+      const a = q.audit;
+      pane.appendChild(el('h3', { text: '泄漏审计', style: 'margin-top:24px' }));
+      pane.appendChild(el('div', { class: 'rule', style:
+        'border-left-color:' + (a.ok ? '#34d399' : '#ef4444') + ';cursor:default',
+        html: `<span class="pill ${a.ok ? 'ok' : 'bad'}">${a.verdict}</span>
+               <span class="muted">　失败项 ${a.failedCount} / 共 ${a.items.length}</span>` }));
+      const t5 = el('table');
+      t5.appendChild(el('thead', { html: '<tr><th>检查项</th><th>状态</th><th>依据</th></tr>' }));
+      const b5 = el('tbody');
+      a.items.forEach(it => {
+        const cls = it.status === 'PASS' ? 'ok' : it.status === 'FAIL' ? 'bad' : 'warn';
+        b5.appendChild(el('tr', { html:
+          `<td>${it.name}</td><td><span class="pill ${cls}">${it.status}</span></td>
+           <td style="text-align:left" class="muted">${it.evidence}</td>` }));
+      });
+      t5.appendChild(b5);
+      pane.appendChild(t5);
+      pane.appendChild(el('div', { class: 'muted', style: 'margin-top:8px',
+        text: '审计基于每折的实际执行记录（重算训练折统计量并比对），不是"点了严格模式就算通过"。' }));
     }
   }
 

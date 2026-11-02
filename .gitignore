@@ -18,3 +18,5 @@ workbench/_*.txt
 _*.py
 .chrome-live/
 
+.chrome-live21/
+.chrome-live*/

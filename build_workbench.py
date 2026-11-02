@@ -8,11 +8,13 @@ OUT = ROOT / "DAC-Workbench.html"
 
 html = (WB / "index.html").read_text(encoding="utf-8")
 core = (WB / "core.js").read_text(encoding="utf-8")
+pre = (WB / "preprocess.js").read_text(encoding="utf-8")
 ui = (WB / "ui.js").read_text(encoding="utf-8")
 samples = (ROOT / "data" / "samples.js").read_text(encoding="utf-8")
 
 bundle = (
     "<script>\n" + samples + "\n</script>\n"
+    "<script>\n" + pre + "\n</script>\n"
     "<script>\n" + core + "\n</script>\n"
     "<script>\n" + ui + "\n</script>\n"
 )
