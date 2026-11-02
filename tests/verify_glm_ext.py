@@ -1,9 +1,10 @@
-import json, subprocess, sys
+import json
+import os, subprocess, sys
 from pathlib import Path
 import numpy as np, pandas as pd, statsmodels.api as sm
 
 ROOT = Path(__file__).resolve().parent.parent
-NODE = r"USERDIR\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe"
+NODE = os.environ.get("NODE_BIN", "node")
 
 rng = np.random.default_rng(20261105)
 n = 400

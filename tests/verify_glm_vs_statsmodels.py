@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """GLM 数值验证：与 statsmodels 逐项对照（Gaussian / Logistic / Poisson）。"""
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -11,7 +12,7 @@ import statsmodels.api as sm
 
 ROOT = Path(__file__).resolve().parent.parent
 PY = sys.executable
-NODE = r"USERDIR\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe"
+NODE = os.environ.get("NODE_BIN", "node")
 
 
 def make_data(seed=20261103):
