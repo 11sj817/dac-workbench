@@ -1322,6 +1322,13 @@
     }
     const X = validRows.map(i => rawX[i].slice());
 
+    // 条件变量类型（结构信息，不是从数据分布估计的参数）：
+    // 二分类只允许 2 个等级，否则中间等级必然为空，等级编码失去意义。
+    // 这里用全量判断"是不是二分类"，具体切点仍然只在训练折算。
+    const colTypes = names.map((_, j) => detectTargetType(rawX.map(r => r[j])).type);
+    const colLevels = colTypes.map(t => (t === 'binary') ? 2 : o.levels);
+    const discreteCols = colTypes.map(t => t === 'binary' || t === 'categorical');
+
     const perFold = [];
     const oofPred = new Array(X.length).fill(-1);
     // OOF 的"真实标签"必须来自各折自己的验证集标签（与预测同一口径），
@@ -1382,9 +1389,13 @@
 
       // 按列批量离散化：每列只建一次云、只跑一轮云滴
       // （逐单元格调用会让复杂度乘上样本数，400×11 会慢几百倍）
-      const colOpt = { levels: o.levels, drops: o.drops, seed: o.seed };
-      const trCols = names.map((_, j) => calibrateWith(trImp.map(r => r[j]), bounds[j], colOpt).codes);
-      const teCols = names.map((_, j) => calibrateWith(teImp.map(r => r[j]), bounds[j], colOpt).codes);
+      // 每列的等级数按类型决定（二分类 = 2）
+      const trCols = names.map((_, j) => calibrateWith(
+        trImp.map(r => r[j]), bounds[j],
+        { levels: colLevels[j], drops: o.drops, seed: o.seed }).codes);
+      const teCols = names.map((_, j) => calibrateWith(
+        teImp.map(r => r[j]), bounds[j],
+        { levels: colLevels[j], drops: o.drops, seed: o.seed }).codes);
       const XtrCodes = trImp.map((_, i) => names.map((_, j) => trCols[j][i]));
       const XteCodes = teImp.map((_, i) => names.map((_, j) => teCols[j][i]));
       // 离散目标：真实标签就是编码本身；连续目标：用训练折的界离散化
@@ -1419,6 +1430,8 @@
         testRawIdx: testIdx.map(i => validRows[i]),
         imputeModel: impModel,
         bounds, yBounds,
+        colLevels: colLevels.slice(),
+        colTypes: colTypes.slice(),
         imputeLog: impLog
       });
     }
@@ -1809,6 +1822,24 @@
 
   const BN_MAX_JOINT = 200000;   // 精确推断的联合空间上限
 
+  /**
+   * 预估贝叶斯网络的联合状态空间。
+   * 结构化学习（爬山 + BIC）本身不受此限，只有"精确枚举推断"受限，
+   * 所以超限时应保留结构、明确禁用推断，而不是把整个 BN 扔掉。
+   */
+  function bnStateSpace(nVars, levels) {
+    const total = Math.pow(levels, nVars);
+    const ok = total <= BN_MAX_JOINT;
+    return {
+      vars: nVars, levels, total, limit: BN_MAX_JOINT, ok,
+      // 满足上限时最多能放几个变量
+      maxVars: Math.floor(Math.log(BN_MAX_JOINT) / Math.log(Math.max(2, levels))),
+      readable: total >= 1e8 ? (total / 1e8).toFixed(1) + ' 亿'
+        : total >= 1e4 ? (total / 1e4).toFixed(1) + ' 万'
+        : String(total)
+    };
+  }
+
   function bnInfer(model, evidence) {
     const { names, levels } = model;
     const n = names.length;
@@ -1882,7 +1913,7 @@
     crossValidate, crossValidateStrict, leakageAudit, stratifiedFolds, groupFolds, evalMetrics,
     weightedMean, weightedQuantile,
     calibrateWith, buildClouds, assignCodes, assignCodesLUT, LUT_MIN_N, detectTargetType, elbowCurve, robustness, nameScenarios,
-    bnLearn, bnInfer, bnSensitivity, toCSV,
+    bnLearn, bnInfer, bnSensitivity, bnStateSpace, BN_MAX_JOINT, toCSV,
     kmeans, silhouette, pca, cart, predictTree, network, report,
     numericCols, isNum, mean, std, quantile, LEVEL_LABELS
   };

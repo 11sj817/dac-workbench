@@ -170,6 +170,89 @@ body{padding-bottom:38px}
   .card{padding:12px}
   .stat{grid-template-columns:1fr 1fr}
 }
+
+/* ============================================================
+ * V3.5 结构与视觉
+ * 1) 宽屏时主导航变成左侧固定栏（不再和五步条抢首屏）
+ * 2) 浅色纸面主题（默认深色可切）
+ * 3) 收敛圆角/渐变/发光，提高信息密度
+ * ============================================================ */
+
+/* ---- 主题 token ---- */
+body.light{
+  --bg:#F5F6F7; --panel:#FFFFFF; --panel2:#F1F3F5; --line:#DDE2E7;
+  --txt:#242A31; --dim:#69737E; --acc:#3F6E8C; --acc2:#5A8FA8;
+  --warn:#B4761A; --bad:#C0392B; --ok:#2E7D5B; --violet:#6B5B95;
+  background:#F5F6F7;
+}
+body.light header{background:#FFFFFF;border-bottom:1px solid var(--line)}
+body.light .card{background:#FFFFFF;border-color:var(--line)}
+body.light .tabs button{background:#FFFFFF;border-color:var(--line);color:var(--dim)}
+body.light .tabs button.on{background:var(--acc);border-color:var(--acc);color:#fff}
+body.light table th{background:var(--panel2)}
+body.light .summary{background:#FFFFFF;border-color:var(--line)}
+body.light .summary h4{color:var(--acc)}
+body.light .summary li{color:var(--txt)}
+body.light .summary b{color:var(--txt);font-weight:600}
+body.light .rule{color:var(--txt)}
+body.light .hint b{color:var(--acc)}
+body.light .card b{color:var(--txt)}
+body.light .stat b{color:var(--txt)}
+body.light .rule{background:var(--panel2)}
+body.light .bar{background:#E8ECEF}
+body.light .statusbar{background:#FFFFFF;border-top:1px solid var(--line)}
+body.light .drop{border-color:var(--line);background:var(--panel2)}
+body.light textarea,body.light input,body.light select{background:#FFFFFF;color:var(--txt);border-color:var(--line)}
+body.light .hint{background:var(--panel2);border-color:var(--line);color:var(--txt)}
+body.light .pill{background:var(--panel2)}
+body.light .chip{background:var(--panel2);border-color:var(--line)}
+
+/* 数字等宽，便于纵向比较 */
+body, table, .stat b, .summary{font-variant-numeric:tabular-nums}
+
+/* 正文与表格字号 */
+body{font-size:14.5px;line-height:1.6}
+table{font-size:13px}
+table th{font-weight:600;letter-spacing:.02em}
+
+/* 收敛圆角与装饰 */
+.card{border-radius:6px}
+.tabs button{border-radius:4px}
+button.mini,button.ghost{border-radius:4px}
+.hint{border-radius:5px}
+.pill{border-radius:3px}
+.bar{border-radius:2px}
+
+/* ---- 左导航（宽屏） ---- */
+@media (min-width:1180px){
+  #tabs{
+    position:fixed; left:0; top:52px; bottom:0; width:172px;
+    display:flex; flex-direction:column; align-items:stretch; gap:2px;
+    padding:12px 10px; overflow-y:auto;
+    background:var(--panel); border-right:1px solid var(--line);
+    border-radius:0; z-index:40;
+  }
+  #tabs button{
+    width:100%; text-align:left; justify-content:flex-start;
+    padding:7px 10px; font-size:12.5px;
+  }
+  .wrap{padding-left:184px !important}
+  /* 右侧结果卡去掉外层冗余边框，避免"卡片套卡片" */
+  .wrap > div:last-child > .card{border:none;background:transparent;padding:0}
+}
+
+/* ---- 窄屏：恢复水平滚动标签 ---- */
+@media (max-width:1179px){
+  #tabs{display:flex;flex-wrap:wrap;gap:6px}
+  #tabs button{font-size:12px;padding:5px 9px}
+}
+
+/* ---- 主题开关 ---- */
+#btnTheme{
+  padding:4px 10px;font-size:12px;border-radius:4px;
+  border:1px solid var(--line);background:var(--panel2);color:var(--txt);cursor:pointer;
+}
+#btnTheme:hover{border-color:var(--acc)}
 </style>
 </head>
 <body>
@@ -181,6 +264,7 @@ body{padding-bottom:38px}
   <span class="tag">CART 规则</span>
   <span class="tag">贝叶斯网络</span>
   <div class="grow"></div>
+    <button id="btnTheme" title="切换深色/浅色">浅色</button>
   <ol class="steps" id="steps">
     <li data-step="1" class="on">1 数据</li>
     <li data-step="2">2 变量</li>

@@ -557,7 +557,17 @@
     const X = keep.map(r => idxF.map(j => r[j]));
 
     const cal = {};
-    factors.forEach((f, i) => { cal[f] = C.calibrate(X.map(r => r[i]), params); });
+    // 二分类条件变量只分 2 级：否则中间等级恒空，等级编码无意义
+    const factorTypes = {};
+    factors.forEach((f, i) => {
+      const col = X.map(r => r[i]);
+      const t = C.detectTargetType(col);
+      factorTypes[f] = t.type;
+      const lv = (t.type === 'binary') ? 2 : params.levels;
+      cal[f] = C.calibrate(col, Object.assign({}, params, { levels: lv }));
+      cal[f].levelsUsed = lv;
+      cal[f].varType = t.type;
+    });
     const calY = C.calibrate(yv, params);
     const levels = params.levels;
     const labels = C.LEVEL_LABELS[levels];
@@ -610,11 +620,23 @@
     // 贝叶斯网络（离散化后的数据）
     const discrete = keep.map((_, i) => factors.map(f => cal[f].codes[i]).concat([calY.codes[i]]));
     const allNames = factors.concat([target]);
-    let bn = null, sens = null;
+    let bn = null, sens = null, bnError = null;
+    const stateSpace = C.bnStateSpace(allNames.length, levels);
     try {
+      // 结构学习不受联合空间限制，先学结构
       bn = C.bnLearn(discrete, allNames, levels);
-      sens = factors.map(f => ({ f, rows: C.bnSensitivity(bn, f, levels) }));
-    } catch (e) { console.warn('BN failed', e); }
+      // 精确推断才受限：超限就跳过敏感性，但保留网络结构
+      if (stateSpace.ok) {
+        sens = factors.map(f => ({ f, rows: C.bnSensitivity(bn, f, levels) }));
+      } else {
+        bnError = `联合状态空间 ${stateSpace.readable}（${stateSpace.vars} 个变量 × ${levels} 状态）` +
+          `超出精确枚举上限 ${stateSpace.limit.toLocaleString()}，` +
+          `已保留网络结构，但无法计算条件概率与敏感性。` +
+          `要恢复推断：变量降到 ${stateSpace.maxVars} 个以内，或把等级数降到 2。`;
+      }
+    } catch (e) {
+      bnError = 'BN 学习失败：' + ((e && e.message) || String(e));
+    }
 
     const res = {
       meta: { target, factors, rows: S.rows.length, usedRows: keep.length, params },
@@ -625,7 +647,7 @@
       tree: Object.assign({}, tree, { single, cv }),
       net: Object.assign({}, net, { threshold: params.netThreshold }),
       pca: pc,
-      bn, sens,
+      bn, sens, bnError, stateSpace,
       leakFeatures
     };
     res.report = C.report(res);
@@ -1485,7 +1507,8 @@
   function renderBN() {
     const pane = $('#pane'), r = S.res;
     if (!r.bn) {
-      pane.innerHTML = '<div class="muted">贝叶斯网络未生成（变量或等级过多时会被跳过）。</div>';
+      pane.innerHTML = '<div class="muted">贝叶斯网络未生成。</div>' +
+        (r.bnError ? `<div class="hint" style="border-color:#5a2020;color:#fca5a5;margin-top:10px">${esc(r.bnError)}</div>` : '');
       return;
     }
     const bn = r.bn, names = bn.names, levels = bn.levels, L = r.calibration.labels;
@@ -1493,6 +1516,17 @@
     pane.appendChild(el('div', { class: 'muted', html:
       `结构学习：爬山法 + BIC 评分（父节点上限 2）；参数学习：极大似然 + 拉普拉斯平滑。
        共 <b>${bn.edges.length}</b> 条有向边。` }));
+
+    // 联合状态空间：结构可学，但超过上限时精确推断不可用，必须说清楚
+    if (r.bnError) {
+      pane.appendChild(el('div', { class: 'hint',
+        style: 'border-color:#5a2020;color:#fca5a5;margin-top:10px', html:
+        '<b>⚠ 精确推断不可用（结构已保留）</b><br>' + esc(r.bnError) }));
+    } else if (r.stateSpace && r.stateSpace.ok) {
+      pane.appendChild(el('div', { class: 'muted', style: 'margin-top:6px;font-size:11.5px', html:
+        `联合状态空间 ${r.stateSpace.readable}（${r.stateSpace.vars} 变量 × ${r.stateSpace.levels} 状态），` +
+        `在上限 ${r.stateSpace.limit.toLocaleString()} 以内，条件概率与敏感性可用。` }));
+    }
 
     // 结构图
     const W = 700, H = 430, cx = W / 2, cy = H / 2, R = 150;
@@ -3507,4 +3541,26 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
     setTimeout(() => $('#btnRun').click(), 2600);
     setTimeout(() => { const t = Q.get('tab'); if (t && S.res) setTab(t); }, 4200);
   }
+
+  /* ---------------- 主题（深/浅） ---------------- */
+  function initTheme() {
+    const KEY = 'dac-theme-v1';
+    const btn = document.getElementById('btnTheme');
+    let saved = 'dark';
+    try { saved = localStorage.getItem(KEY) || 'dark'; } catch (e) { }
+    const apply = (light) => {
+      document.body.classList.toggle('light', light);
+      if (btn) btn.textContent = light ? '深色' : '浅色';
+    };
+    apply(saved === 'light');
+    if (btn) {
+      btn.onclick = () => {
+        const light = !document.body.classList.contains('light');
+        apply(light);
+        try { localStorage.setItem(KEY, light ? 'light' : 'dark'); } catch (e) { }
+      };
+    }
+  }
+  initTheme();
+
 })();
