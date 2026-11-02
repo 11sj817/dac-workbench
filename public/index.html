@@ -2931,6 +2931,13 @@ window.__DATASETS__ = {"iris": {"name": "鸢尾花（UCI Iris，150 条）", "de
     const single = {};
     factors.forEach((f, j) => { single[f] = C.pearson(X.map(r => r[j]), yv); });
 
+    // 特征泄漏检测：某条件变量与目标几乎线性相关时，模型会"抄答案"
+    const leakFeatures = [];
+    factors.forEach((f, i) => {
+      const rr = C.pearson(X.map(r => r[i]), yv);
+      if (Number.isFinite(rr) && Math.abs(rr) > 0.95) leakFeatures.push({ name: f, r: rr });
+    });
+
     // 交叉验证
     const minLeaf = Math.max(10, Math.round(keep.length / 40));
     const cv = C.crossValidate(Xc, yc, factors, labels, { maxDepth: params.treeDepth, minLeaf }, 5);
@@ -2959,7 +2966,8 @@ window.__DATASETS__ = {"iris": {"name": "鸢尾花（UCI Iris，150 条）", "de
       tree: Object.assign({}, tree, { single, cv }),
       net: Object.assign({}, net, { threshold: params.netThreshold }),
       pca: pc,
-      bn, sens
+      bn, sens,
+      leakFeatures
     };
     res.report = C.report(res);
     return res;
@@ -2973,6 +2981,12 @@ window.__DATASETS__ = {"iris": {"name": "鸢尾花（UCI Iris，150 条）", "de
     if (!r) { box.style.display = 'none'; return; }
     box.style.display = '';
     const L = [];
+    if (r.leakFeatures && r.leakFeatures.length) {
+      L.push('<span class="warnline"><b>⚠ 疑似特征泄漏</b>：' +
+        r.leakFeatures.map(x => `${esc(x.name)} 与目标 r=${x.r.toFixed(3)}`).join('、') +
+        ' —— 这些变量几乎等同于目标本身，模型的高准确率是「抄答案」而非真实预测力。' +
+        '请确认它们是否在因果上先于目标发生。</span>');
+    }
     const prof = r.profile;
     const miss = prof.columns.reduce((a, c) => a + c.missing, 0);
     const out = prof.columns.reduce((a, c) => a + (c.outliers || 0), 0);
@@ -3134,6 +3148,12 @@ window.__DATASETS__ = {"iris": {"name": "鸢尾花（UCI Iris，150 条）", "de
       }
     }
 
+    if (S.res && S.res.leakFeatures && S.res.leakFeatures.length) {
+      pane.appendChild(el('div', { class: 'hint', style: 'border-color:#5a2020;color:#fca5a5;margin-top:12px',
+        html: '<b>疑似特征泄漏</b>：' + S.res.leakFeatures.map(x => `<code>${esc(x.name)}</code>（r=${x.r.toFixed(3)}）`).join('、') +
+          '<br>这些变量与目标几乎线性相关，可能是目标的另一种度量（如「第一次成绩」预测「最终成绩」）。' +
+          '若它们不是真正的先决因素，应从模型中剔除。' }));
+    }
     if (prof.warnings.length) {
       pane.appendChild(el('h3', { text: '体检提示', style: 'margin-top:16px;color:#f59e0b' }));
       prof.warnings.forEach(w => pane.appendChild(el('div', { class: 'rule', text: w })));
