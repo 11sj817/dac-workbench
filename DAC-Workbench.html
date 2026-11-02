@@ -4965,6 +4965,19 @@ window.__DATASETS__ = {"iris": {"name": "鸢尾花（UCI Iris，150 条）", "de
     }
 
     box.innerHTML = `<h4>结论摘要 · 自动生成（数字全部来自本地计算）</h4><ul>${L.map(x => `<li>${x}</li>`).join('')}</ul>`;
+
+    // 证据入口：点开直接看每个数字的出处
+    const nEv = (r.evidence || []).length;
+    if (nEv) {
+      const bar = el('div', { style: 'margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap' });
+      const b = el('button', { class: 'ghost mini', text: `ⓘ 查看证据表（${nEv} 项）` });
+      b.onclick = () => { setTab('report'); scrollTop(); };
+      bar.appendChild(b);
+      const bad = (r.evidence || []).filter(e => !e.valid).length;
+      if (bad) bar.appendChild(el('span', { class: 'muted', style: 'font-size:11.5px',
+        text: `${bad} 项不可用（未运行/超限），摘要里不会编造这些数` }));
+      box.appendChild(bar);
+    }
   }
 
   /* ---------------- Tab ---------------- */
