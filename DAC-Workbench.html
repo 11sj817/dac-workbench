@@ -4721,8 +4721,201 @@ window.__DATASETS__ = {"iris": {"name": "鸢尾花（UCI Iris，150 条）", "de
       bn, sens, bnError, stateSpace,
       leakFeatures
     };
-    res.report = C.report(res);
+    // 证据登记表：报告/AI/图表共用同一套 metricId
+    try { res.evidence = buildEvidence(res); } catch (e) { res.evidence = []; }
+    res.report = C.report(res) + evidenceMarkdown(res.evidence);
     return res;
+  }
+
+  /* ---------------- 证据登记表 ----------------
+   * 每个对外出现的数字都在这里有一条记录：
+   *   id          稳定标识（报告/AI/图表共用）
+   *   value       原始值
+   *   formatted   展示值（含单位/保留位）
+   *   unit        单位
+   *   denominator 分母（比率类必填，避免"67%"说不清是 67/100 还是 67/1000）
+   *   stage       评价阶段（数据 / 训练 / 验证 / 严格CV / 稳定性 / 推断）
+   *   method      计算方法
+   *   valid       false 表示"有这个字段但不可用"（如未运行、超限）
+   *   note        限制说明
+   * ------------------------------------------ */
+  function buildEvidence(res) {
+    const out = [];
+    const add = (id, label, value, o) => {
+      const opt = o || {};
+      const nf = (v, d) => (Number.isFinite(v) ? v.toFixed(d === undefined ? 2 : d) : '—');
+      let formatted = opt.formatted;
+      if (formatted === undefined) {
+        if (typeof value === 'number') {
+          // 整数不补小数位（150 而不是 150.00）
+          const txt = Number.isInteger(value) ? String(value) : nf(value, opt.digits);
+          formatted = txt + (opt.unit || '');
+        } else {
+          formatted = String(value);
+        }
+      }
+      out.push({
+        id, label, value,
+        formatted,
+        unit: opt.unit || '',
+        denominator: opt.denominator === undefined ? null : opt.denominator,
+        stage: opt.stage || '描述',
+        method: opt.method || '',
+        valid: opt.valid !== false,
+        note: opt.note || ''
+      });
+    };
+
+    /* ---- 数据 ---- */
+    add('data.rows', '样本数', res.profile.rows, { unit: ' 条', stage: '数据' });
+    add('data.cols', '变量数', res.profile.cols, { unit: ' 个', stage: '数据' });
+    add('data.usedRows', '进入分析的样本', res.meta.usedRows, {
+      unit: ' 条', stage: '数据',
+      denominator: res.profile.rows,
+      method: '剔除目标缺失行后剩余'
+    });
+    const miss = res.profile.columns.reduce((a, c) => a + c.missing, 0);
+    add('data.missingCells', '缺失单元格', miss, { unit: ' 个', stage: '数据' });
+    const outl = res.profile.columns.reduce((a, c) => a + (c.outliers || 0), 0);
+    add('data.outliers', 'IQR 异常值', outl, {
+      unit: ' 个', stage: '数据',
+      method: '1.5×IQR 规则（两侧各算一次）'
+    });
+
+    /* ---- 泄漏筛查 ---- */
+    const leak = res.leakFeatures || [];
+    add('leak.count', '高相关特征数', leak.length, {
+      unit: ' 个', stage: '数据',
+      valid: true,
+      method: '|r| > 0.95 与目标的相关',
+      note: leak.length ? leak.map(x => `${x.name}(r=${x.r.toFixed(3)})`).join('、') + '——只是风险筛查，不等于确认泄漏' : '未发现'
+    });
+
+    /* ---- 聚类 ---- */
+    add('cluster.k', '聚类数 k', res.scenarios.k, { unit: '', stage: '训练' });
+    add('cluster.silhouette', '轮廓系数', res.scenarios.silhouette, {
+      digits: 3, stage: '训练',
+      method: '欧氏距离下的平均轮廓宽',
+      note: '衡量当前距离/数据下的分离程度，不是准确率，也不证明模型最优'
+    });
+
+    /* ---- 规则 ---- */
+    if (res.tree && res.tree.rules && res.tree.rules.length) {
+      const r0 = res.tree.rules[0];
+      add('rules.count', '规则数', res.tree.rules.length, { unit: ' 条', stage: '训练' });
+      add('rules.topSupport', '最强规则支持数', r0.support, {
+        unit: ' 条', stage: '训练',
+        denominator: res.meta.usedRows,
+        method: 'CART 叶节点样本数'
+      });
+      add('rules.topConfidence', '最强规则置信度', r0.confidence, {
+        digits: 1, unit: '%', stage: '训练',
+        formatted: (r0.confidence * 100).toFixed(1) + '%',
+        denominator: r0.support,
+        method: '叶节点内该类占比（训练内条件比例）',
+        note: '不是置信区间，也不是未来可靠性'
+      });
+    }
+
+    /* ---- 交叉验证 ---- */
+    if (res.tree && res.tree.accuracy !== undefined) {
+      add('cv.trainAcc', '训练准确率', res.tree.accuracy, {
+        digits: 1, unit: '%', stage: '训练',
+        formatted: (res.tree.accuracy * 100).toFixed(1) + '%',
+        denominator: res.meta.usedRows
+      });
+    }
+    if (res.tree && res.tree.cv) {
+      add('cv.kfoldAcc', '普通 5 折准确率', res.tree.cv.mean, {
+        digits: 1, unit: '%', stage: '验证（诊断性质）',
+        formatted: (res.tree.cv.mean * 100).toFixed(1) + '%',
+        method: '全量数据预校准后的 5 折（非严格验证）',
+        note: '主报告应优先引用严格 CV 结果'
+      });
+    }
+    const st = S.extra && S.extra.strict;
+    if (st && st.ok) {
+      add('strictCV.oofAcc', '严格 CV · OOF 准确率', st.oof.accuracy, {
+        digits: 1, unit: '%', stage: '严格CV',
+        formatted: (st.oof.accuracy * 100).toFixed(1) + '%',
+        denominator: st.oof.n,
+        method: '每折独立填补/校准/建模，OOF 汇总'
+      });
+      add('strictCV.balancedAcc', '严格 CV · Balanced Acc', st.oof.balancedAccuracy, {
+        digits: 1, unit: '%', stage: '严格CV',
+        formatted: (st.oof.balancedAccuracy * 100).toFixed(1) + '%'
+      });
+      add('strictCV.gap', '训练-验证差', st.gap * 100, {
+        digits: 1, unit: ' 个百分点', stage: '严格CV',
+        method: '训练均值 − 验证均值'
+      });
+    } else {
+      add('strictCV.oofAcc', '严格 CV · OOF 准确率', null, {
+        stage: '严格CV', valid: false, formatted: '未运行',
+        note: '不要据此推断泛化能力'
+      });
+    }
+
+    /* ---- Bootstrap ---- */
+    const bt = S.extra && S.extra.boot && S.extra.boot.result;
+    if (bt && bt.okCount > 0) {
+      add('boot.runs', 'Bootstrap 成功轮数', bt.okCount, {
+        unit: ' 轮', stage: '稳定性', denominator: bt.B
+      });
+      if (bt.summary && bt.summary.cluster) {
+        add('boot.ari', 'Bootstrap ARI 均值', bt.summary.cluster.ariMean, {
+          digits: 3, stage: '稳定性',
+          method: '各轮重采样聚类与参考划分的一致性',
+          note: '结构稳定性，不是监督准确率，也不是因果概率'
+        });
+      }
+      if (bt.summary && bt.summary.rules && bt.summary.rules.oob) {
+        add('boot.oob', 'OOB 准确率', bt.summary.rules.oob.accuracy, {
+          digits: 1, unit: '%', stage: '袋外验证',
+          formatted: (bt.summary.rules.oob.accuracy * 100).toFixed(1) + '%',
+          note: `覆盖率 ${(bt.summary.rules.oob.coverage * 100).toFixed(1)}%`
+        });
+      }
+    } else {
+      add('boot.runs', 'Bootstrap 成功轮数', null, { stage: '稳定性', valid: false, formatted: '未运行' });
+    }
+
+    /* ---- BN ---- */
+    if (res.bn) {
+      add('bn.edges', '贝叶斯网络边数', res.bn.edges.length, { unit: ' 条', stage: '推断' });
+      if (res.bnError) {
+        add('bn.infer', '精确推断', null, {
+          stage: '推断', valid: false, formatted: '不可用', note: res.bnError
+        });
+      } else if (res.stateSpace) {
+        add('bn.infer', '精确推断', res.stateSpace.total, {
+          unit: ' 个联合状态', stage: '推断',
+          formatted: res.stateSpace.readable,
+          note: `上限 ${res.stateSpace.limit.toLocaleString()}`
+        });
+      }
+    }
+
+    return out;
+  }
+
+  /** 证据表 → Markdown（附在报告末尾） */
+  function evidenceMarkdown(list) {
+    if (!list || !list.length) return '';
+    const L = [];
+    L.push('');
+    L.push('## 附：证据登记表');
+    L.push('');
+    L.push('报告中每个数字都能在此找到出处。`有效=否` 表示该项有字段但结果不可用。');
+    L.push('');
+    L.push('| ID | 指标 | 值 | 分母 | 阶段 | 方法 | 有效 | 限制 |');
+    L.push('|---|---|---|---|---|---|---|---|');
+    list.forEach(e => {
+      const v = e.valid ? e.formatted : `**${e.formatted}**`;
+      L.push(`| \`${e.id}\` | ${e.label} | ${v} | ${e.denominator === null ? '—' : e.denominator} | ${e.stage} | ${e.method || '—'} | ${e.valid ? '是' : '**否**'} | ${e.note || '—'} |`);
+    });
+    L.push('');
+    return L.join('\n');
   }
 
   /* ---------------- 结论摘要 ---------------- */
@@ -6850,7 +7043,19 @@ window.__DATASETS__ = {"iris": {"name": "鸢尾花（UCI Iris，150 条）", "de
       L.push('主分析未运行，除数据描述外的结论都不可得');
     }
 
-    /* ---- 10. 用户问题 ---- */
+    /* ---- 10. 证据索引（与报告、图表共用同一套 metricId）---- */
+    if (r && r.evidence && r.evidence.length) {
+      L.push('');
+      L.push('【证据索引】');
+      L.push('以下每个 ID 对应报告末尾证据表的一行；引用数字时优先带 ID：');
+      r.evidence.slice(0, 14).forEach(e => {
+        L.push(`· ${e.id} = ${e.valid ? e.formatted : '（不可用：' + (e.note || e.formatted) + '）'}` +
+          (e.denominator !== null ? `（分母 ${e.denominator}，${e.stage}）` : `（${e.stage}）`));
+      });
+      if (r.evidence.length > 14) L.push(`· …共 ${r.evidence.length} 项，完整表见报告`);
+    }
+
+    /* ---- 11. 用户问题 ---- */
     if (question) {
       L.push('');
       L.push('【用户问题】');
@@ -7185,7 +7390,9 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
       '1. 只能使用给定 JSON 中出现的数字。不得编造、不得估算、不得写"大约/左右"。',
       '2. 不得自己重新计算统计量（相关系数、准确率、p 值等）。',
       '3. 稳定性 ≠ 准确率；相关 ≠ 因果；边频率 ≠ 因果概率。',
-      '4. 上下文里已包含「严格交叉验证」「Bootstrap 稳定性」「特征泄漏筛查」「结果有效性」四节。' +
+      '4. 上下文里有「证据索引」，每个 ID 对应报告的证据表。引用数字时优先写 ID（如 `strictCV.oofAcc`），' +
+      '没有 ID 的数字视为无出处。' +
+      '5. 上下文里已包含「严格交叉验证」「Bootstrap 稳定性」「特征泄漏筛查」「结果有效性」四节。' +
       '凡是标注"未运行"的项，你不能当作已完成；凡是高相关特征，只在最前面提示风险，不得直接断言泄漏。',
       '5. 未做统计检验时，不要用"显著"这个词。',
       '',
