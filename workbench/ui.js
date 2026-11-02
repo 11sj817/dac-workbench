@@ -247,7 +247,7 @@
     sel.onchange = () => {
       const d = DS[sel.value];
       if (!d) return;
-      applyData({ columns: d.columns, rows: d.rows }, d.name, d.desc + ' · 来源：' + d.source);
+      applyData({ columns: d.columns, rows: d.rows }, d.name, d.desc + ' · 来源：' + d.source, d);
     };
   })();
 
@@ -257,7 +257,7 @@
     if (!d) return toast('示例数据未加载');
     const sel = $('#dsSelect');
     if (sel) sel.value = k;
-    applyData({ columns: d.columns, rows: d.rows }, d.name, d.desc + ' · 来源：' + d.source);
+    applyData({ columns: d.columns, rows: d.rows }, d.name, d.desc + ' · 来源：' + d.source, d);
   }
 
   /** 清空所有分析产物（换数据时必须调用，否则旧结果会残留） */
@@ -272,9 +272,11 @@
     if (st) st.textContent = '等待运行';
   }
 
-  function applyData(parsed, name, desc) {
+  function applyData(parsed, name, desc, meta) {
     if (!parsed.columns.length) return toast('文件里没有读到表格');
     resetAnalysis();
+    // 数据集语义元数据（目标推荐、类型、排除列、说明）——决定"研究问题"是什么
+    S.dsMeta = meta || null;
     S.columns = parsed.columns;
     S.rows = parsed.rows;
     S.rowsRaw = parsed.rows.map(r => r.slice());
@@ -282,19 +284,43 @@
     S.numeric = C.numericCols(S.columns, S.rows);
     if (S.numeric.length < 2) return toast('至少需要 2 个数值列', 5000);
 
-    // 初始化变量角色：最后一列 target，其余按类型自动判定
+    // 初始化变量角色：
+    // 有元数据 → 用 recommendedTarget / roleHints / exclude
+    // 无元数据（用户自己导入）→ 回退到"最后一列"，但界面明确提示需要确认
     S.roles = {};
-    const lastIdx = S.columns.length - 1;
+    const recTarget = meta && meta.recommendedTarget && S.columns.includes(meta.recommendedTarget)
+      ? meta.recommendedTarget : null;
+    const targetName = recTarget || S.columns[S.columns.length - 1];
+    const hints = (meta && meta.roleHints) || {};
+    const excl = new Set((meta && meta.exclude) || []);
     S.columns.forEach((c2, j) => {
       const col = parsed.rows.map(r => r[j]);
       const t = (window.DACPre ? window.DACPre.inferType(col, { name: c2 }) : 'num');
-      S.roles[c2] = (j === lastIdx) ? 'target'
-        : t === 'id' ? 'id'
-        : t === 'empty' ? 'exclude'
-        : (t === 'cat' || t === 'binary') ? 'cat' : 'num';
+      if (c2 === targetName) S.roles[c2] = 'target';
+      else if (excl.has(c2)) S.roles[c2] = 'exclude';
+      else if (hints[c2]) S.roles[c2] = hints[c2];
+      else if (t === 'id') S.roles[c2] = 'id';
+      else if (t === 'empty') S.roles[c2] = 'exclude';
+      else if (t === 'cat' || t === 'binary') S.roles[c2] = 'cat';
+      else S.roles[c2] = 'num';
     });
     const prof = C.profile(S.columns, S.rows);
+    const metaLines = [];
+    if (meta && meta.recommendedTarget) {
+      metaLines.push(`<div style="margin-top:6px"><b>推荐目标</b>：${esc(meta.recommendedTarget)}` +
+        `${meta.targetType ? ' <span class="pill info">' + esc(meta.targetType) + '</span>' : ''}` +
+        `${meta.task ? ' · ' + esc(meta.task) : ''}</div>`);
+    }
+    if (meta && meta.note) {
+      metaLines.push(`<div class="muted" style="margin-top:4px;font-size:11.5px">${esc(meta.note)}</div>`);
+    }
+    if (meta && meta.caveatPredictors && meta.caveatPredictors.length) {
+      metaLines.push(`<div class="hint" style="margin-top:6px;border-color:#5a4a1a;color:#f5c66b">` +
+        `⚠ <b>预测时点提醒</b>：${meta.caveatPredictors.map(esc).join('、')} 是否可用取决于预测发生在什么时候；` +
+        `若目标是"提前预测"，这些变量尚未发生，必须排除。</div>`);
+    }
     $('#dsInfo').innerHTML = `<b>${esc(name)}</b><br>${parsed.rows.length} 行 · ${parsed.columns.length} 列 · 数值列 ${S.numeric.length} 个`
+      + metaLines.join('')
       + (desc ? `<br><span class="muted">${desc}</span>` : '');
     $('#status').textContent = `${parsed.rows.length} 行已就绪`;
     const tag = $('#dsTag');
@@ -302,7 +328,11 @@
 
     const t = $('#target'); t.innerHTML = '';
     S.numeric.forEach(c => t.appendChild(el('option', { value: c, text: c })));
-    t.value = S.numeric[S.numeric.length - 1];
+    // 目标来自角色定义（内置数据有 recommendedTarget），不再是"最后一列"
+    const roleTarget = S.columns.find(c2 => S.roles[c2] === 'target');
+    t.value = (roleTarget && S.numeric.includes(roleTarget))
+      ? roleTarget
+      : S.numeric[S.numeric.length - 1];
     t.onchange = renderFactors;
 
     S.target = t.value;
@@ -318,7 +348,8 @@
   function renderFactors() {
     const box = $('#factors'); box.innerHTML = '';
     const tgt = $('#target').value;
-    S.numeric.filter(c => c !== tgt).forEach(c => {
+    const usable = new Set(['num', 'cat']);
+    S.numeric.filter(c => c !== tgt && (S.roles[c] === undefined || usable.has(S.roles[c]))).forEach(c => {
       const cb = el('input', { type: 'checkbox', value: c });
       cb.checked = true;
       cb.style.marginRight = '7px';
@@ -643,7 +674,7 @@
         f, spread: Math.max(...rows.map(x => x.posterior[lv])) - Math.min(...rows.map(x => x.posterior[lv]))
       })).sort((a, b) => b.spread - a.spread);
       if (scored[0]) {
-        L.push(`机制强度：<b>${scored[0].f}</b> 最关键——固定在不同等级时，${r.meta.target} 最高档的概率相差 <b>${(scored[0].spread * 100).toFixed(1)}</b> 个百分点。`);
+        L.push(`条件概率差：固定 <b>${scored[0].f}</b> 在不同等级时，${r.meta.target} 最高档的概率相差 <b>${(scored[0].spread * 100).toFixed(1)}</b> 个百分点。`);
       }
     }
 
@@ -1658,7 +1689,7 @@
 
     const changed = runs.filter(x => x !== base && x.top && base.top && x.top.then !== base.top.then).length;
     const verdict = changed === 0
-      ? ['ok', '全部变体给出同一方向的主规则——结论稳健，可以写进论文。']
+      ? ['ok', '多次扰动后主规则方向一致——这是参数敏感性下的初步一致性，不等于统计显著性，也不等于可外推。']
       : changed <= 2
         ? ['warn', `${changed} 个变体改变了主规则方向——需要在论文里说明参数敏感性。`]
         : ['bad', `${changed} 个变体改变了主规则——结论不稳，建议重新考虑分位点或变量选择。`];
@@ -2448,27 +2479,95 @@
     return `已设置 · ${k.length} 位 · ****`;
   }
 
-  async function callLLM(messages) {
+  /** 各服务商的输出上限（推理型模型需留足 thinking 预算） */
+  const MAX_TOKENS_BY_PROVIDER = {
+    deepseek: 4000, zhipu: 4000, openai: 4000,
+    dashscope: 3000, moonshot: 4000, siliconflow: 3000, relay: 4000, custom: 4000
+  };
+
+  /**
+   * 调用 OpenAI 兼容接口，返回结构化结果而不是裸字符串。
+   * 返回 { content, reasoning, finishReason, usage, requestId, warnings }
+   */
+  async function callLLM(messages, opt) {
     const c = aiCfg();
-    if (!c.key) throw new Error('还没填 API Key（在下面「接入设置」里填）');
-    const base = (c.baseURL || PROVIDERS[c.provider || 'deepseek'].base).replace(/\/+$/, '');
-    const model = c.model || PROVIDERS[c.provider || 'deepseek'].model;
+    if (!c.key) throw new Error('还没填 API Key（在「接入设置」里填）');
+    const prov = c.provider || 'deepseek';
+    const base = (c.baseURL || PROVIDERS[prov].base).replace(/\/+$/, '');
+    const model = c.model || PROVIDERS[prov].model;
+    const o = opt || {};
+    const maxTokens = o.maxTokens || MAX_TOKENS_BY_PROVIDER[prov] || 3000;
+
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 45000);
+    const timer = setTimeout(() => ctrl.abort(), o.timeoutMs || 90000);
+    let res;
     try {
-      const res = await fetch(base + '/chat/completions', {
+      res = await fetch(base + '/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + c.key },
-        body: JSON.stringify({ model, messages, temperature: 0.25, max_tokens: 1400 }),
+        body: JSON.stringify({
+          model, messages,
+          temperature: o.temperature === undefined ? 0.2 : o.temperature,
+          max_tokens: maxTokens
+        }),
         signal: ctrl.signal
       });
-      if (!res.ok) {
-        const t = await res.text();
-        throw new Error('HTTP ' + res.status + '：' + t.slice(0, 220));
+    } catch (e) {
+      clearTimeout(timer);
+      if (e && e.name === 'AbortError') throw new Error('请求超时（' + Math.round((o.timeoutMs || 90000) / 1000) + 's）或被取消');
+      throw new Error('网络请求失败：' + (e && e.message ? e.message : String(e)));
+    }
+
+    if (!res.ok) {
+      clearTimeout(timer);
+      const t = await res.text().catch(() => '');
+      throw new Error('HTTP ' + res.status + '：' + t.slice(0, 300));
+    }
+
+    let j;
+    const raw = await res.text().catch(() => '');
+    clearTimeout(timer);
+    try {
+      j = JSON.parse(raw);
+    } catch (e) {
+      throw new Error('返回不是合法 JSON：' + raw.slice(0, 200));
+    }
+
+    const choice = j && j.choices && j.choices[0];
+    if (!choice) {
+      throw new Error('返回里没有 choices（原始：' + raw.slice(0, 200) + '）');
+    }
+    const msg = choice.message || {};
+    const content = (msg.content || '').trim();
+    const reasoning = (msg.reasoning_content || '').trim();
+    const finish = choice.finish_reason;
+    const usage = j.usage || {};
+    const warnings = [];
+
+    if (finish === 'length') {
+      warnings.push(`输出被截断（finish_reason=length，用了 ${usage.completion_tokens || '?'} tokens）`);
+    }
+
+    if (!content) {
+      if (reasoning) {
+        throw new Error(
+          `模型只输出了推理过程、正文为空（finish=${finish || '?'}，输出 ${usage.completion_tokens || 0} tokens）。` +
+          '这是推理型模型的常见现象：token 被 thinking 消耗完。' +
+          `已自动请求 ${maxTokens} 上限，仍不足请换非推理模型（如 deepseek-chat）或调低问题复杂度。`
+        );
       }
-      const j = await res.json();
-      return (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || '';
-    } finally { clearTimeout(timer); }
+      throw new Error(
+        `模型返回空正文（finish=${finish || '?'}，输出 ${usage.completion_tokens || 0} tokens）。` +
+        '可能是模型拒答、参数不被接受或服务端异常。'
+      );
+    }
+
+    return {
+      content, reasoning: reasoning || null,
+      finishReason: finish || null, usage,
+      requestId: (j.id || j.request_id || null),
+      warnings, model
+    };
   }
 
   /* 从结果里收集所有出现过的数字，用于校验模型有没有编数 */
@@ -2508,7 +2607,8 @@
     const nums = (text.match(/\d+(?:\.\d+)?/g) || []).map(Number);
     const bad = [];
     nums.forEach(n => {
-      if (n <= 4) return;                       // 等级/小整数放过
+      // V3.3：不再对小整数放行——AUC=0.99、p=0.003、类别数 3 都必须有出处
+      // （等级标签 0/1/2 属于索引，由 base 里的 levels 长度覆盖）
       const cands = [n, n / 100, n * 100];
       const hit = cands.some(x => allow.some(y => Math.abs(y - x) <= Math.max(0.02, Math.abs(y) * 0.02)));
       if (!hit) bad.push(n);
@@ -2624,7 +2724,8 @@
                key: inKey.value.trim(), persist: persistChk.checked });
       const t0 = performance.now();
       try {
-        const txt = await callLLM([{ role: 'user', content: '只回复两个字：可用' }]);
+        const r0 = await callLLM([{ role: 'user', content: '只回复两个字：可用' }], { maxTokens: 200 });
+        const txt = r0.content;
         const ms = Math.round(performance.now() - t0);
         testOut.style.borderColor = '#1f4a3c';
         testOut.innerHTML = `<b style="color:#34d399">连接成功</b> · 延迟 ${ms}ms · 模型 ${inModel.value || '(默认)'}<br>
@@ -2701,7 +2802,7 @@ ${JSON.stringify(b, null, 1)}
 请只输出 JSON，不要解释，格式：
 {"target":"","factors":[""],"lowPct":25,"highPct":75,"levels":3,"k":3,"treeDepth":3,"netThreshold":0.2,"reason":"一句话说明为什么这样选"}
 要求：factors 必须来自 columns；k 在 2-6；treeDepth 1-4；levels 2-4；netThreshold 0.1-0.5。`;
-        const txt = await callLLM([{ role: 'user', content: prompt }]);
+        const txt = (await callLLM([{ role: 'user', content: prompt }])).content;
         const m = /\{[\s\S]*\}/.exec(txt);
         if (!m) throw new Error('模型没有返回 JSON：' + txt.slice(0, 200));
         const plan = JSON.parse(m[0]);
@@ -2742,9 +2843,9 @@ ${JSON.stringify(b, null, 1)}
 请用中文写 3 段：
 1) 数据与分型：样本、情境划分、各情境特征；
 2) 条件组合规则：挑 2 条最重要的规则，说明业务含义；
-3) 机制与边界：哪个变量最关键（给出概率变化），并声明"相关不等于因果"。
+3) 条件依赖：哪个变量在给定网络下与结果关联最强（给出条件概率差值），并说明这不是干预效应，P(Y|X) ≠ P(Y|do(X))。
 要求：只能使用 JSON 里出现过的数字；不要编造变量名；语气客观。`;
-        const txt = await callLLM([{ role: 'user', content: prompt }]);
+        const txt = (await callLLM([{ role: 'user', content: prompt }])).content;
         out.className = 'ai-msg';
         out.textContent = txt;
         const bad = auditNumbers(txt, r);
@@ -2871,7 +2972,8 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
           .concat(hist)
           .concat([{ role: 'user', content: q2 + ctx }]);
         const t0 = performance.now();
-        const txt2 = await callLLM(msgs);
+        const r2 = await callLLM(msgs);
+        const txt2 = r2.content;
         const ms = Math.round(performance.now() - t0);
         let bad = [];
         try { bad = auditNumbers(txt2, r) || []; } catch (e) { bad = []; }
