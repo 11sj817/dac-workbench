@@ -141,6 +141,35 @@ body{padding-bottom:38px}
   .wrap{display:block;padding:0}
   body{background:#fff;color:#111}
 }
+
+/* V2.9.1 导航与结果工具条 */
+.resultbar{display:flex;align-items:center;gap:8px;padding:8px 12px;margin-bottom:10px;
+  background:#101c27;border:1px solid var(--line);border-radius:10px;position:sticky;top:6px;z-index:20;
+  backdrop-filter:blur(6px)}
+.resultbar .mini{padding:4px 10px;font-size:12px}
+.steps li{cursor:pointer;user-select:none;transition:all .15s}
+.steps li:hover{transform:translateY(-1px)}
+#dsTag{cursor:pointer;transition:all .15s}
+#dsTag:hover{border-color:var(--acc);color:#fff}
+/* 平板 / 小屏：右栏下移，不做隐藏 */
+@media (max-width:1180px){
+  .wrap{grid-template-columns:1fr !important}
+  .wrap > aside{order:3;max-height:none}
+  .resultbar{position:static}
+}
+@media (max-width:820px){
+  header h1{font-size:15px}
+  .steps li{font-size:11px;padding:4px 8px}
+  .steps li span{display:none}
+  .wrap{padding:0 10px}
+  .stat > div{min-width:46%}
+}
+@media (max-width:560px){
+  .steps{gap:3px}
+  .steps li{padding:4px 6px;font-size:10.5px}
+  .card{padding:12px}
+  .stat{grid-template-columns:1fr 1fr}
+}
 </style>
 </head>
 <body>
