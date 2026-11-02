@@ -153,6 +153,14 @@ const TASKS = {
     };
   },
 
+  /* Bootstrap 稳定性（聚类 / 规则 / 网络） */
+  bootstrapStability(payload, onProgress) {
+    const B = self.DACBootstrap;
+    if (!B) throw new Error('缺少 DACBootstrap 模块');
+    const { data, opt } = payload;
+    return B.run(data, opt, onProgress);
+  },
+
   /* 肘部曲线 */
   elbow(payload, onProgress) {
     const C = self.DACCore;

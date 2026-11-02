@@ -629,6 +629,15 @@
     const n = X.length;
     if (n < k) throw new Error('样本数少于聚类数');
     const Z = robustScale(X);
+    // 同时记录缩放参数：外部样本（参考集）必须用同一组 med/iqr 才能和 centers 同尺度比较
+    const pDim = X[0].length;
+    const med = [], iqr = [];
+    for (let j = 0; j < pDim; j++) {
+      const col = X.map(r2 => r2[j]).sort((a, b) => a - b);
+      const q1 = quantile(col, 0.25), q3 = quantile(col, 0.75);
+      med.push(quantile(col, 0.5));
+      iqr.push((q3 - q1) || std(col) || 1);
+    }
     const r = rng(seed);
     let best = null;
     for (let init = 0; init < nInit; init++) {
@@ -673,7 +682,7 @@
       for (let i = 0; i < n; i++) inertia += dist2(Z[i], centers[labels[i]]);
       if (!best || inertia < best.inertia) best = { labels: labels.slice(), centers: centers.map(c => c.slice()), inertia, iters: iter, emptyClusters };
     }
-    return { ...best, k, Z };
+    return { ...best, k, Z, med, iqr };
   }
 
   function silhouette(Z, labels) {
