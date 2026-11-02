@@ -2226,8 +2226,32 @@ window.__DATASETS__ = {"wine": {"name": "红酒质量（UCI Wine Quality，抽�
     else if (obj && typeof obj === 'object') Object.values(obj).forEach(o => collectNumbers(o, set));
     return set;
   }
+  /* 允许"派生数字"：模型常做差值、比值、占比这类合法运算 */
+  function expandNumbers(base) {
+    const set = new Set(base);
+    const arr = [...base].filter(x => x > 0 && x < 1e6).slice(0, 60);
+    for (let i = 0; i < arr.length; i++) {
+      for (let j = i + 1; j < arr.length; j++) {
+        const a = arr[i], b = arr[j];
+        set.add(Math.abs(a - b));                       // 差值
+        set.add(Math.abs((a - b) / (a || 1) * 100));    // 差值占比
+        set.add(a / b);                                 // 比值
+        set.add(b / a);
+      }
+    }
+    return set;
+  }
+
   function auditNumbers(text, res) {
-    const allow = [...collectNumbers(res)];
+    const base = collectNumbers(res);
+    // 数组长度也常被引用（"11 个因素"）
+    [res && res.meta && res.meta.factors,
+     res && res.tree && res.tree.rules,
+     res && res.profile && res.profile.columns,
+     res && res.calibration && res.calibration.labels].forEach(a => {
+      if (Array.isArray(a)) base.add(a.length);
+    });
+    const allow = [...expandNumbers(base)];
     const nums = (text.match(/\d+(?:\.\d+)?/g) || []).map(Number);
     const bad = [];
     nums.forEach(n => {
