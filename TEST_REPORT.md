@@ -9,7 +9,7 @@
 ## 一、如何运行
 
 ```bash
-cd PROJDIR\dac-reverse-research
+cd <项目根目录>
 node tests/test_core.js
 ```
 

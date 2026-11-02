@@ -28,7 +28,7 @@
 ## 方式 B：命令行推送（改了代码想自动更新就用这个）
 
 ```bash
-cd PROJDIR\dac-reverse-research
+cd <项目根目录>
 
 # 第一次：关联远程仓库（把 URL 换成你自己的）
 git remote add origin https://github.com/<用户名>/dac-workbench.git

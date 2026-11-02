@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 
-ROOT = Path(r"PROJDIR\dac-reverse-research")
+ROOT = Path(__file__).resolve().parent.parent
 PUB = ROOT / "data" / "public"
 OUT = ROOT / "data" / "samples.js"
 N = 300

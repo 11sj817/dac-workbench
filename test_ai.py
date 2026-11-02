@@ -55,7 +55,7 @@ def check_cors(base: str, key: str) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--key", default="")
-    ap.add_argument("--keyfile", default=r"PROJDIR\api-key.txt")
+    ap.add_argument("--keyfile", default="", help="从文件读取 Key（默认不读任何文件）")
     ap.add_argument("--base", default="https://api.deepseek.com/v1")
     ap.add_argument("--model", default="deepseek-chat")
     args = ap.parse_args()
