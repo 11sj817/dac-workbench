@@ -142,6 +142,62 @@
         return 2 * (y > 0 ? y * Math.log(y / m) - (y - m) : m);
       },
       init: (y) => y.map(v => Math.log(Math.max(0.01, v + 0.1)))
+    },
+    gamma: {
+      // 用 log link 而非 inverse：inverse 在 η→0+ 时 μ 爆炸，IRLS 极易发散；
+      // log link 数值稳定且解释直观（exp(β) 为倍数效应），是实践中更稳的选择
+      name: 'Gamma (log)',
+      linkinv: (eta) => Math.exp(Math.max(-35, Math.min(35, eta))),
+      mueta: (mu) => Math.max(1e-10, mu),
+      variance: (mu) => Math.max(1e-10, mu * mu),
+      devResid: (y, mu) => {
+        const m = Math.max(1e-10, mu), yy = Math.max(1e-10, y);
+        return 2 * ((yy - m) / m - Math.log(yy / m));
+      },
+      init: (y) => y.map(v => Math.log(Math.max(1e-6, v))),
+      validate: (y) => {
+        if (!y.every(v => v > 0)) throw new Error('Gamma 要求目标变量全部 > 0');
+      }
+    },
+    'gamma-inverse': {
+      name: 'Gamma (inverse)',
+      linkinv: (eta) => {
+        if (!(eta > 1e-8)) return NaN;   // 非正 η 视为无效，交给步长衰减处理
+        return 1 / eta;
+      },
+      mueta: (mu) => -1 / Math.max(1e-20, mu * mu),
+      variance: (mu) => Math.max(1e-10, mu * mu),
+      devResid: (y, mu) => {
+        const m = Math.max(1e-10, mu), yy = Math.max(1e-10, y);
+        return 2 * ((yy - m) / m - Math.log(yy / m));
+      },
+      init: (y) => {
+        const m = y.reduce((a, b) => a + b, 0) / y.length;
+        return y.map(() => 0.5 / Math.max(1e-6, m));   // 保守初值，留出正的 η
+      },
+      validate: (y) => {
+        if (!y.every(v => v > 0)) throw new Error('Gamma 要求目标变量全部 > 0');
+      }
+    },
+    negbin: {
+      name: 'Negative Binomial (log)',
+      // θ（离散参数）通过矩估计确定，见 estimateTheta()
+      linkinv: (eta) => Math.exp(Math.max(-35, Math.min(35, eta))),
+      mueta: (mu) => Math.max(1e-10, mu),
+      variance: (mu, theta) => {
+        const t = Math.max(1e-6, theta || 1);
+        return Math.max(1e-10, mu + mu * mu / t);
+      },
+      devResid: (y, mu, theta) => {
+        const m = Math.max(1e-10, mu), t = Math.max(1e-6, theta || 1);
+        const a = y > 0 ? y * Math.log(y / m) : 0;
+        const b = (y + t) * Math.log((y + t) / (m + t));
+        return 2 * (a - b);
+      },
+      init: (y) => y.map(v => Math.log(Math.max(0.01, v + 0.1))),
+      validate: (y) => {
+        if (!y.every(v => v >= 0 && Number.isInteger(v))) throw new Error('负二项要求目标为非负整数计数');
+      }
     }
   };
 
@@ -160,6 +216,25 @@
     for (let i = 0; i < n; i++) for (let j = 0; j < p; j++) {
       if (!Number.isFinite(X[i][j])) throw new Error(`第 ${i + 1} 行第 ${design.names[j]} 列含非数值`);
     }
+
+    // Gamma / 负二项的前置校验
+    if (fam.validate) fam.validate(y);
+
+    // 负二项：先用泊松估计 θ（矩估计），再固定 θ 做 IRLS
+    let theta = d.theta || null;
+    if (d.family === 'negbin') {
+      if (!theta) {
+        const muP = y.reduce((a, b) => a + b, 0) / n;
+        const varP = y.reduce((a, b) => a + (b - muP) ** 2, 0) / (n - 1);
+        // θ̂ = μ² / (var - μ)，var<=μ 时退化为大 θ（≈泊松）
+        theta = varP > muP ? (muP * muP) / (varP - muP) : 1e6;
+        theta = Math.max(1e-4, theta);
+      }
+    }
+    // 加权：w 默认全 1
+    const wt = (d.weights && d.weights.length === n)
+      ? d.weights.map(v => (Number.isFinite(v) && v > 0 ? v : 0))
+      : new Array(n).fill(1);
 
     // 二分类取值检查
     if (d.family === 'binomial') {
@@ -198,7 +273,7 @@
       const z = new Array(n);
       for (let i = 0; i < n; i++) {
         const dm = fam.mueta(mu[i]);
-        const v = fam.variance(mu[i]);
+        const v = fam.variance(mu[i], theta);
         W[i] = Math.max(1e-10, dm * dm / v);
         z[i] = eta[i] + (y[i] - mu[i]) / Math.max(1e-10, dm);
       }
@@ -210,7 +285,8 @@
         XtWz.push(0);
       }
       for (let i = 0; i < n; i++) {
-        const wi = W[i];
+        const wi = W[i] * wt[i];
+        if (wi <= 0) continue;
         for (let a = 0; a < p; a++) {
           const xa = X[i][a];
           if (xa === 0) continue;
@@ -227,18 +303,39 @@
         throw new Error(`IRLS 第 ${iter + 1} 次迭代出现非有限系数（${bad.join('、')}）：` +
           '常见原因是某列方差为 0、样本数不足以识别该参数，或数据含极端值。');
       }
-      // 收敛判据：相对变化
-      let maxDelta = 0;
-      for (let j = 0; j < p; j++) maxDelta = Math.max(maxDelta, Math.abs(nb[j] - beta[j]));
-      beta = nb;
+      // 步长控制（halving）：inverse link 等情况下完整牛顿步会发散，
+      // 只接受能降低 deviance 的步长
+      const devOf = (b) => {
+        let d = 0;
+        for (let i = 0; i < n; i++) {
+          let e = 0;
+          for (let j = 0; j < p; j++) e += X[i][j] * b[j];
+          const mm = fam.linkinv(e);
+          if (!Number.isFinite(mm)) return Infinity;
+          d += fam.devResid(y[i], mm, theta);
+        }
+        return Number.isFinite(d) ? d : Infinity;
+      };
 
-      deviance = 0;
-      const mu2 = beta.slice();
-      for (let i = 0; i < n; i++) {
-        let e = 0;
-        for (let j = 0; j < p; j++) e += X[i][j] * beta[j];
-        deviance += fam.devResid(y[i], fam.linkinv(e));
+      let step = 1, accepted = null, devNew = Infinity;
+      const curDev = Number.isFinite(deviance) ? deviance : Infinity;
+      for (let h = 0; h < 12; h++) {
+        const cand = beta.map((v, j) => v + step * (nb[j] - v));
+        const dv = devOf(cand);
+        if (dv <= curDev * (1 + 1e-10) || !Number.isFinite(curDev)) {
+          accepted = cand; devNew = dv; break;
+        }
+        step /= 2;
       }
+      if (!accepted) {
+        throw new Error(`IRLS 第 ${iter + 1} 次迭代无法降低 deviance（${fam.name}），` +
+          '可能是数据与链接函数不匹配或存在极端值。');
+      }
+
+      let maxDelta = 0;
+      for (let j = 0; j < p; j++) maxDelta = Math.max(maxDelta, Math.abs(accepted[j] - beta[j]));
+      beta = accepted;
+      deviance = devNew;
 
       if (maxDelta < tol || Math.abs(deviance - lastDev) < tol * (1 + Math.abs(deviance))) {
         converged = true;
@@ -264,14 +361,16 @@
     const Wf = new Array(n);
     for (let i = 0; i < n; i++) {
       const dm = fam.mueta(mu[i]);
-      const v = fam.variance(mu[i]);
+      const v = fam.variance(mu[i], theta);
       Wf[i] = Math.max(1e-10, dm * dm / v);
     }
     for (let i = 0; i < n; i++) {
+      const wi = Wf[i] * wt[i];
+      if (wi <= 0) continue;
       for (let a = 0; a < p; a++) {
         const xa = X[i][a];
         if (xa === 0) continue;
-        for (let b = 0; b < p; b++) XtWX[a][b] += xa * Wf[i] * X[i][b];
+        for (let b = 0; b < p; b++) XtWX[a][b] += xa * wi * X[i][b];
       }
     }
     const cov = inverse(XtWX);
@@ -281,7 +380,7 @@
     const dfResid = n - p;
     let pearson = 0;
     for (let i = 0; i < n; i++) {
-      const v = fam.variance(mu[i]);
+      const v = fam.variance(mu[i], theta);
       pearson += (y[i] - mu[i]) ** 2 / Math.max(1e-10, v);
     }
     const dispersion = d.family === 'gaussian' ? (deviance / Math.max(1, dfResid)) : (pearson / Math.max(1, dfResid));
@@ -314,14 +413,16 @@
     let nullDev = 0;
     const muNull = d.family === 'gaussian' ? yMean
       : d.family === 'binomial' ? yMean : yMean;
-    for (let i = 0; i < n; i++) nullDev += fam.devResid(y[i], muNull);
+    for (let i = 0; i < n; i++) nullDev += fam.devResid(y[i], muNull, theta);
 
     // 诊断
-    const diag = diagnose({ X, y, mu, beta, design, fam, dispersion, pearson, dfResid, nullDev, n, p });
+    const diag = diagnose({ X, y, mu, beta, design, fam, dispersion, pearson, dfResid, nullDev, n, p, theta });
 
     return {
       family: d.family,
       familyName: fam.name,
+      theta: (d.family === 'negbin') ? theta : null,
+      weighted: wt.some(v => v !== 1),
       n, p, dfResid,
       converged, iterations: iter,
       coef, codings: design.codings, names: design.names,
@@ -402,7 +503,7 @@
 
     // 2) 过度离散（Poisson）
     let overdispersed = false;
-    if (fam === FAMILIES.poisson) {
+    if (fam === FAMILIES.poisson || fam === FAMILIES.negbin) {
       const ratio = pearson / Math.max(1, dfResid);
       if (ratio > 1.5) {
         overdispersed = true;
@@ -452,8 +553,8 @@
 
     // 5) 残差
     const resid = y.map((v, i) => v - mu[i]);
-    const pearsonResid = resid.map((r, i) => r / Math.sqrt(Math.max(1e-10, fam.variance(mu[i]))));
-    const devResid = y.map((v, i) => Math.sign(v - mu[i]) * Math.sqrt(Math.max(0, fam.devResid(v, mu[i]))));
+    const pearsonResid = resid.map((r, i) => r / Math.sqrt(Math.max(1e-10, fam.variance(mu[i], x.theta))));
+    const devResid = y.map((v, i) => Math.sign(v - mu[i]) * Math.sqrt(Math.max(0, fam.devResid(v, mu[i], x.theta))));
 
     return {
       separated, overdispersed, vif, warnings,

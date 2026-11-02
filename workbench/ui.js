@@ -1675,7 +1675,7 @@
   /* ---------------- 统计建模（GLM） ---------------- */
   function glmState() {
     if (!S.extra.glm) {
-      S.extra.glm = { family: 'gaussian', response: '', xvars: [], reference: {}, fit: null, error: null, roc: null, cm: null };
+      S.extra.glm = { family: 'gaussian', response: '', xvars: [], reference: {}, fit: null, error: null, roc: null, cm: null, weightCol: '' };
     }
     return S.extra.glm;
   }
@@ -1687,6 +1687,7 @@
     if (!G) { pane.innerHTML = '<div class="muted">GLM 模块未加载。</div>'; return; }
     if (!S.rows.length) { pane.innerHTML = '<div class="muted">先导入数据。</div>'; return; }
     const q = glmState();
+    if (q.weightCol === undefined) q.weightCol = '';
 
     pane.appendChild(el('div', { class: 'muted', html:
       '这里做的是 <b>统计推断</b>：参数估计、标准误、显著性、OR/IRR。' +
@@ -1725,12 +1726,28 @@
     };
 
     const selFam = el('select', {});
-    [['gaussian', 'Gaussian（正态 · identity）'], ['binomial', 'Binomial（二项 · logit）'], ['poisson', 'Poisson（泊松 · log）']]
+    [['gaussian', 'Gaussian（正态 · identity）'],
+     ['binomial', 'Binomial（二项 · logit）'],
+     ['poisson', 'Poisson（泊松 · log）'],
+     ['gamma', 'Gamma（伽马 · log）'],
+     ['gamma-inverse', 'Gamma（伽马 · inverse）'],
+     ['negbin', '负二项（log，θ 自动估计）']]
       .forEach(([v, l]) => { const o = el('option', { value: v, text: l }); if (q.family === v) o.selected = true; selFam.appendChild(o); });
     selFam.onchange = () => { q.family = selFam.value; q.fit = null; renderGLM(); };
 
+    // 权重列（可选）：频率权重 = 该样本代表多少个体
+    const selW = el('select', {});
+    selW.appendChild(el('option', { value: '', text: '（不加权）' }));
+    S.numeric.forEach(c => {
+      const o = el('option', { value: c, text: c });
+      if (q.weightCol === c) o.selected = true;
+      selW.appendChild(o);
+    });
+    selW.onchange = () => { q.weightCol = selW.value; q.fit = null; };
+
     grid.appendChild(cell('目标变量', selResp, 240));
-    grid.appendChild(cell('分布 / 链接', selFam, 260));
+    grid.appendChild(cell('分布 / 链接', selFam, 280));
+    grid.appendChild(cell('权重列（可选）', selW, 170));
     pane.appendChild(grid);
 
     if (q.response && types[q.response]) {
@@ -1805,7 +1822,16 @@
           }
         });
         const family = q.family || selFam.value || 'gaussian';
-        const payload = { rows: S.rows, y: yv, spec: { numCols, catCols }, family };
+        let wts = null;
+        if (q.weightCol) {
+          const wi = S.columns.indexOf(q.weightCol);
+          if (wi < 0) throw new Error(`权重列「${q.weightCol}」不在当前数据里`);
+          wts = rowsUse.map(r => r[wi]);
+          if (wts.some(v => !Number.isFinite(v) || v <= 0)) {
+            throw new Error('权重列必须全部为有限的正数');
+          }
+        }
+        const payload = { rows: S.rows, y: yv, spec: { numCols, catCols }, family, weights: wts };
         // GLM 在主线程执行：样本量通常在千级以内，IRLS 只要几十毫秒；
         // 走 Worker 反而要克隆整张数据表，得不偿失
         if (!numCols.length && !catCols.length) throw new Error('至少选择一个自变量');
@@ -1892,6 +1918,8 @@
       ['Pearson χ²', f.pearson.toFixed(2)],
       ['离散参数', f.dispersion.toFixed(4)]
     ];
+    if (f.theta != null) stats.push(['NB 离散参数 θ', f.theta.toFixed(3)]);
+    if (f.weighted) stats.push(['加权', '是（频率权重）']);
     if (f.r2 != null) stats.push(['R²', f.r2.toFixed(4)]);
     if (f.r2adj != null) stats.push(['调整 R²', f.r2adj.toFixed(4)]);
     if (f.rmse != null) stats.push(['RMSE', f.rmse.toFixed(4)]);

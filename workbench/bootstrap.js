@@ -106,6 +106,13 @@
       return res;
     };
 
+    // 时间依赖数据必须用块抽样，不能用 IID 冒充
+    if (o.method === 'block') {
+      return sampleBlockIndices({
+        n, B, seed: o.seed, blockType: o.blockType, blockLength: o.blockLength
+      }).indices;
+    }
+
     for (let b = 0; b < B; b++) {
       let idx = [];
       const k = Math.max(2, Math.round(n * frac));
@@ -156,6 +163,69 @@
       out.push(idx);
     }
     return out;
+  }
+
+  /* ---------------- Block Bootstrap（时间依赖） ---------------- */
+  /**
+   * 三种块抽样，块内保留时间顺序，用于存在自相关的序列数据。
+   *  - moving   : 起点 0..n-b，取连续 b 个（块数 ⌈n/b⌉）
+   *  - circular : 起点 0..n-1，取 b 个但越过 n 回绕到开头
+   *  - stationary: 块长服从几何分布（均值 L），P(继续)=1-1/L
+   */
+  function sampleBlockIndices(o) {
+    const n = o.n, B = o.B, rnd = makeRng(o.seed === undefined ? 42 : o.seed);
+    const L = Math.max(2, Math.min(n, Math.round(o.blockLength || Math.max(2, Math.round(Math.sqrt(n))))));
+    const type = o.blockType || 'moving';
+    const out = [];
+
+    if (type === 'stationary') {
+      // Politis & Romano (1994)：每步以概率 1/L 重新起块，否则接上一个
+      for (let b = 0; b < B; b++) {
+        const idx = [];
+        let cur = Math.floor(rnd() * n);
+        for (let i = 0; i < n; i++) {
+          idx.push(cur);
+          if (rnd() < 1 / L) cur = Math.floor(rnd() * n);
+          else cur = (cur + 1) % n;
+        }
+        out.push(idx);
+      }
+      return { indices: out, blockLength: L, type };
+    }
+
+    const blockCount = Math.ceil(n / L);
+    for (let b = 0; b < B; b++) {
+      const idx = [];
+      for (let k = 0; k < blockCount && idx.length < n; k++) {
+        let start;
+        if (type === 'circular') start = Math.floor(rnd() * n);
+        else start = Math.floor(rnd() * Math.max(1, n - L + 1));   // moving
+        for (let j = 0; j < L && idx.length < n; j++) {
+          idx.push((start + j) % n);
+        }
+      }
+      out.push(idx);
+    }
+    return { indices: out, blockLength: L, type };
+  }
+
+  /* ---------------- 内存估算 ---------------- */
+  function memoryEstimate(n, B) {
+    // 共聚类矩阵 n×n 两个 Float64Array
+    const coBytes = n * n * 8 * 2;
+    // 每次重采样保存 n 个标签
+    const labelBytes = B * n * 4;
+    const total = coBytes + labelBytes;
+    return {
+      n, B,
+      coClusterMB: +(coBytes / 1048576).toFixed(1),
+      labelsMB: +(labelBytes / 1048576).toFixed(1),
+      totalMB: +(total / 1048576).toFixed(1),
+      // 建议：超过 512 MB 就别算完整矩阵
+      mode: total > 512 * 1048576 ? 'sample-pairs'
+        : total > 128 * 1048576 ? 'sparse'
+        : 'full'
+    };
   }
 
   /* ---------------- 共聚类矩阵 ---------------- */
@@ -274,13 +344,20 @@
 
     const idxList = sampleIndices({
       n, B: o.B, seed: o.seed, fraction: o.fraction, replacement: o.replacement,
-      method: o.method, groups: data.groups, strata: data.strata, weights: data.weights
+      method: o.method, groups: data.groups, strata: data.strata, weights: data.weights,
+      blockType: o.blockType, blockLength: o.blockLength
     });
 
     for (let b = 0; b < o.B; b++) {
       const idx = idxList[b];
       const rec = { b: b + 1, idx, ok: false };
       const t1 = Date.now();
+      // OOB（袋外）索引：本次重采样中从未被抽到的样本
+      const inBag = new Set(idx);
+      const oobIdx = [];
+      for (let i = 0; i < n; i++) if (!inBag.has(i)) oobIdx.push(i);
+      rec.oobIdx = oobIdx;
+      rec.oobCoverage = oobIdx.length / n;
       try {
         if (o.task === 'cluster') {
           const Xs = idx.map(i => data.X[i]);
@@ -331,6 +408,23 @@
           const tree = C.cart(Xcm, yc, names, labels, { maxDepth: o.maxDepth, minLeaf: o.minLeaf });
           rec.rules = tree.rules.map(r => Object.assign({ sig: ruleSignature(r) }, r));
           rec.accuracy = tree.accuracy;
+
+          // OOB 评估：用未进袋的样本做外部验证
+          if (oobIdx.length >= 5) {
+            try {
+              const XoobRaw = oobIdx.map(i => data.X[i]);
+              const XoobImp = im ? P.transformImputer(XoobRaw, im, Xs).matrix : XoobRaw;
+              const XoobCols = names.map((_, j) =>
+                C.calibrateWith(XoobImp.map(r => r[j]), bounds[j], { levels: o.levels, drops: o.drops, seed: o.seed + b }).codes);
+              const XoobCodes = XoobImp.map((_, i) => names.map((_, j) => XoobCols[j][i]));
+              const yOobRaw = oobIdx.map(i => data.y[i]);
+              const yOobCodes = C.calibrateWith(yOobRaw, yB, { levels: o.levels, drops: o.drops, seed: o.seed + b }).codes;
+              const pred = XoobCodes.map(r => C.predictTree(tree.root, r));
+              rec.oob = C.evalMetrics(yOobCodes, pred, o.levels);
+            } catch (e2) {
+              rec.oobError = (e2 && e2.message) || String(e2);
+            }
+          }
           rec.importances = tree.importances;
           rec.rootVar = tree.root && tree.root.f !== undefined ? names[tree.root.f] : null;
           rec.splits = collectSplits(tree.root, names);
@@ -371,6 +465,8 @@
     return {
       task: o.task,
       B: o.B, seed: o.seed, method: o.method, fraction: o.fraction, replacement: o.replacement,
+      blockType: o.blockType || null, blockLength: o.blockLength || null,
+      memory: memoryEstimate(n, o.B),
       n, failed, okCount: runs.filter(r => r.ok).length,
       elapsedMs: Date.now() - t0,
       runs: runs.map(r => ({ b: r.b, ok: r.ok, error: r.error, ms: r.ms, sizes: r.sizes, emptyClusters: r.emptyClusters,
@@ -451,7 +547,19 @@
       const total = Math.max(1, okRuns.length);
       const rules = [...freq.entries()].map(([sig, c]) => ({ sig, count: c, freq: c / total }))
         .sort((a, b) => b.count - a.count);
+      // OOB 汇总（只统计成功算出 OOB 的重采样）
+      const oobRuns = okRuns.filter(r => r.oob);
+      const oobAcc = oobRuns.map(r => r.oob.accuracy).filter(Number.isFinite);
+      const oobBA = oobRuns.map(r => r.oob.balancedAccuracy).filter(Number.isFinite);
+      const oobF1 = oobRuns.map(r => r.oob.macroF1).filter(Number.isFinite);
+      const oobCov = okRuns.map(r => r.oobCoverage).filter(Number.isFinite);
       out.rules = {
+        oob: oobRuns.length ? {
+          runs: oobRuns.length,
+          accuracy: meanOf(oobAcc), accuracySd: sdOf(oobAcc),
+          balancedAccuracy: meanOf(oobBA), macroF1: meanOf(oobF1),
+          coverage: meanOf(oobCov)
+        } : null,
         rules: rules.slice(0, 40),
         ruleCount: rules.length,
         rootVar: [...rootFreq.entries()].map(([v, c]) => ({ name: v, freq: c / total })).sort((a, b) => b.freq - a.freq),
@@ -482,6 +590,13 @@
       };
     }
     return out;
+  }
+
+  function sdOf(a) {
+    const v = a.filter(Number.isFinite);
+    if (v.length < 2) return NaN;
+    const m = v.reduce((x, y) => x + y, 0) / v.length;
+    return Math.sqrt(v.reduce((x, y) => x + (y - m) ** 2, 0) / (v.length - 1));
   }
 
   function meanOf(a) {
@@ -526,6 +641,6 @@
 
   global.DACBootstrap = {
     ari, nmi, sampleIndices, coCluster, ruleSignature, edgeFrequencies, consensusGraph,
-    run, summarize, diagnose, comb2
+    run, summarize, diagnose, comb2, sampleBlockIndices, memoryEstimate, sdOf
   };
 })(typeof window !== 'undefined' ? window : self);

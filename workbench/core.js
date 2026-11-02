@@ -1883,7 +1883,7 @@
     weightedMean, weightedQuantile,
     calibrateWith, buildClouds, assignCodes, assignCodesLUT, LUT_MIN_N, detectTargetType, elbowCurve, robustness, nameScenarios,
     bnLearn, bnInfer, bnSensitivity, toCSV,
-    kmeans, silhouette, pca, cart, network, report,
+    kmeans, silhouette, pca, cart, predictTree, network, report,
     numericCols, isNum, mean, std, quantile, LEVEL_LABELS
   };
 })(typeof window !== 'undefined' ? window : self);
