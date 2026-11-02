@@ -58,3 +58,31 @@ git push                        # Pages 约 1 分钟后生效
 - 不把 API Key / Token 写进仓库、README、日志。
 - 推送时如需内嵌 token，**推送后立刻把 remote 改回干净 URL**。
 - 敏感凭据只走：`git credential fill`（本机凭据管理器）或环境变量。
+
+## 账号选择弹窗的处理约定（重要）
+
+推送时如果弹出 GitHub「Select an account」对话框：
+
+1. **永远选第一个 `11sj817`**
+2. 绝对**不要**选 `x-access-token` —— 那是把 token 拼进 remote URL 产生的伪账号
+
+**为什么会冒出 x-access-token**：当 remote 写成
+`https://x-access-token:<token>@github.com/...` 时，Git Credential Manager 会把它当成独立账号写入凭据管理器：
+`LegacyGeneric:target=git:https://x-access-token@github.com`
+
+**清理命令**（已执行过一次）：
+
+```powershell
+cmdkey /delete:"LegacyGeneric:target=git:https://x-access-token@github.com"
+```
+
+**正确的推送方式**（不污染 remote、不产生伪账号）：
+
+```powershell
+$token = (( "protocol=https`nhost=github.com`n`n" | git credential fill ) -split "`n" |
+          Where-Object { $_ -like 'password=*' }) -replace '^password=',''
+$b64 = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("x-access-token:$token"))
+git -c http.extraheader="Authorization: Basic $b64" push origin main
+```
+
+这样 token 只存在这一条命令的 header 里，**不写 remote、不写凭据管理器、不进 shell history 文件**。
