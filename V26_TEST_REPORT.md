@@ -79,3 +79,20 @@ Macro-F1     61.9%
 
 - Firefox / Safari 实机测试（环境只有 Chrome 156）
 - xlsx 解析的单元测试（依赖浏览器 `DecompressionStream`）
+
+
+---
+
+# 附录：V2.7 验证
+
+| 项 | 结果 |
+|---|---|
+| 数据集数量 | ✅ 7 个（下拉可切换） |
+| `groupFolds` | ✅ 可用，同组不跨折 |
+| 分组严格 CV | ✅ `grouped: true`，k=4 正常 |
+| `weightedMean` | ✅ 手算校验 2.25 |
+| `weightedQuantile` | ✅ 中位数正确 |
+| 角色下拉 | ✅ 8 种（目标/数值/分类/ID/权重/分组/时间/排除） |
+| 历史记录区块 | ✅ 存在，实测已累积 3 条 |
+| console.error | ✅ 0 |
+| 回归测试 | ✅ 33 + 32 全通过 |

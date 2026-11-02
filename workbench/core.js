@@ -1041,6 +1041,68 @@
     return folds;
   }
 
+  /* ---------------- 加权统计 ---------------- */
+  function weightedMean(values, weights) {
+    let sw = 0, sv = 0;
+    for (let i = 0; i < values.length; i++) {
+      const v = values[i], w = weights ? weights[i] : 1;
+      if (!isNum(v) || !isNum(w) || w <= 0) continue;
+      sv += v * w; sw += w;
+    }
+    return sw > 0 ? sv / sw : NaN;
+  }
+
+  /** 加权分位数（权重版的经验分布函数） */
+  function weightedQuantile(values, weights, q) {
+    const pairs = [];
+    for (let i = 0; i < values.length; i++) {
+      const v = values[i], w = weights ? weights[i] : 1;
+      if (!isNum(v) || !isNum(w) || w <= 0) continue;
+      pairs.push([v, w]);
+    }
+    if (!pairs.length) return NaN;
+    pairs.sort((a, b) => a[0] - b[0]);
+    const total = pairs.reduce((acc, p) => acc + p[1], 0);
+    let acc = 0;
+    const target = q * total;
+    for (let i = 0; i < pairs.length; i++) {
+      acc += pairs[i][1];
+      if (acc >= target) return pairs[i][0];
+    }
+    return pairs[pairs.length - 1][0];
+  }
+
+  /* ---------------- 分组 K 折（同一组不跨折） ---------------- */
+  /**
+   * 用于"同一受试者/同一企业/同一地区多次观测"的场景：
+   * 同组样本必须整组落在训练折或验证折，否则会因组内相关性高估性能。
+   */
+  function groupFolds(groups, K, seed) {
+    const byGroup = new Map();
+    groups.forEach((g, i) => {
+      const k = String(g);
+      if (!byGroup.has(k)) byGroup.set(k, []);
+      byGroup.get(k).push(i);
+    });
+    const keys = [...byGroup.keys()];
+    const r = rng(seed || 42);
+    for (let i = keys.length - 1; i > 0; i--) {
+      const j = Math.floor(r() * (i + 1));
+      [keys[i], keys[j]] = [keys[j], keys[i]];
+    }
+    // 大组优先，均衡分配到 K 折
+    keys.sort((a, b) => byGroup.get(b).length - byGroup.get(a).length);
+    const folds = Array.from({ length: K }, () => []);
+    const load = new Array(K).fill(0);
+    keys.forEach(k => {
+      let target = 0;
+      for (let f = 1; f < K; f++) if (load[f] < load[target]) target = f;
+      byGroup.get(k).forEach(i => folds[target].push(i));
+      load[target] += byGroup.get(k).length;
+    });
+    return folds;
+  }
+
   /* ---------------- 交叉验证（分层 + 全指标） ---------------- */
   /**
    * 分层 K 折交叉验证。
@@ -1131,7 +1193,7 @@
    * 严格无泄漏交叉验证
    * 每一折：填补 → 分位数 → 离散化 → 建模，全部只用训练折
    * ============================================================ */
-  function crossValidateStrict(rawX, yRaw, names, labels, opt) {
+  function crossValidateStrict(rawX, yRaw, names, labels, opt, groups) {
     const P = (typeof window !== 'undefined' ? window : globalThis).DACPre;
     if (!P) throw new Error('缺少预处理模块 DACPre（preprocess.js 未加载）');
     const o = Object.assign({
@@ -1162,8 +1224,14 @@
     const rough = calibrate(yv, { lowPct: o.lowPct, highPct: o.highPct, drops: 50, levels: o.levels, seed: o.seed });
     const yClass = rough.codes;
 
-    // 3) 分层切分
-    const folds = stratifiedFolds(yClass, Math.max(2, o.k), o.seed);
+    // 3) 切分：给了 groups 就先按组分块，保证同组不跨折
+    let folds;
+    if (groups && groups.length === yRaw.length) {
+      const gv = validRows.map(i => groups[i]);
+      folds = groupFolds(gv, Math.max(2, o.k), o.seed);
+    } else {
+      folds = stratifiedFolds(yClass, Math.max(2, o.k), o.seed);
+    }
     const X = validRows.map(i => rawX[i].slice());
 
     const perFold = [];
@@ -1268,6 +1336,7 @@
     return {
       ok: perFold.length > 0,
       k: perFold.length,
+      grouped: !!(groups && groups.length === yRaw.length),
       perFold,
       oof: { accuracy: oofM.accuracy, balancedAccuracy: oofM.balancedAccuracy, macroF1: oofM.macroF1, perClass: oofM.perClass, confusion: oofM.confusion, n: oofM.n },
       mean: mean(testAcc) || 0,
@@ -1708,7 +1777,8 @@
 
   global.DACCore = {
     parseCSV, parseXLSX, parseXLSXAll, toXLSX, profile, corrMatrix, calibrate, pearson, robustScale,
-    crossValidate, crossValidateStrict, leakageAudit, stratifiedFolds, evalMetrics,
+    crossValidate, crossValidateStrict, leakageAudit, stratifiedFolds, groupFolds, evalMetrics,
+    weightedMean, weightedQuantile,
     calibrateWith, buildClouds, assignCodes, assignCodesLUT, LUT_MIN_N, elbowCurve, robustness, nameScenarios,
     bnLearn, bnInfer, bnSensitivity, toCSV,
     kmeans, silhouette, pca, cart, network, report,

@@ -458,6 +458,18 @@
         const dt = ((performance.now() - t0) / 1000).toFixed(2);
         $('#status').textContent = `完成 · ${dt}s`;
         toast(`分析完成 ${dt}s`);
+        try {
+          const rr = S.res;
+          histPush({
+            at: new Date().toISOString(),
+            dataset: S.fileName || (S.sheets ? S.sheets[S.sheetIdx].name : '内置示例'),
+            target: rr.meta.target, k: rr.meta.params.k,
+            cv: rr.tree.cv ? rr.tree.cv.mean : null,
+            sil: rr.scenarios.silhouette,
+            rules: rr.tree.rules.length,
+            params: rr.meta.params
+          });
+        } catch (e) { /* 历史记录失败不影响分析 */ }
       } catch (e) {
         console.error(e);
         toast('计算失败：' + e.message, 6000);
@@ -683,6 +695,34 @@
     });
     tb.appendChild(body);
     pane.appendChild(tb);
+
+    // 若指定了权重列，补一张加权均值对照
+    const wCol = S.columns.find(c => S.roles[c] === 'weight');
+    if (wCol) {
+      const wi = S.columns.indexOf(wCol);
+      const wv = S.rows.map(r => r[wi]);
+      const rowsW = prof.columns.map((c, j) => {
+        const vals = S.rows.map(r => r[j]);
+        const wm = C.weightedMean(vals, wv);
+        const raw = c.mean;
+        return { name: c.name, raw, wm, diff: (wm !== null && Number.isFinite(wm) && raw !== undefined)
+          ? (wm - raw) / (Math.abs(raw) > 1e-9 ? Math.abs(raw) : 1) : null };
+      }).filter(x => Number.isFinite(x.wm));
+      if (rowsW.length) {
+        const tw = el('table');
+        tw.appendChild(el('thead', { html: '<tr><th>变量</th><th>普通均值</th><th>加权均值</th><th>相对差异</th></tr>' }));
+        const bw = el('tbody');
+        rowsW.forEach(x => bw.appendChild(el('tr', { html:
+          `<td>${esc(x.name)}</td><td>${fmt(x.raw, 3)}</td><td><b>${fmt(x.wm, 3)}</b></td>
+           <td>${x.diff === null ? '-' : (x.diff * 100).toFixed(1) + '%'}</td>` })));
+        tw.appendChild(bw);
+        pane.appendChild(el('h3', { text: `加权均值对照（权重列：${esc(wCol)}）`, style: 'margin-top:16px' }));
+        pane.appendChild(tw);
+        pane.appendChild(el('div', { class: 'muted', style: 'margin-top:6px',
+          text: '差异越大，说明样本代表性偏倚越明显；加权均值更接近总体真值。' }));
+      }
+    }
+
     if (prof.warnings.length) {
       pane.appendChild(el('h3', { text: '体检提示', style: 'margin-top:16px;color:#f59e0b' }));
       prof.warnings.forEach(w => pane.appendChild(el('div', { class: 'rule', text: w })));
@@ -923,14 +963,16 @@
             treeDepth: S.params.treeDepth || 3,
             minLeaf: Math.max(10, Math.round(WR.length / 40))
           };
+          const gCol = names.find(n => S.roles[n] === 'group');
+          const groups = gCol ? WR.map(r2 => r2[names.indexOf(gCol)]) : null;
           let cv;
           try {
             cv = await WK.run('strictCV',
-              { rawX, yRaw: yv, names: fnames, labels: C.LEVEL_LABELS[levels], opts: cvOpts },
+              { rawX, yRaw: yv, names: fnames, labels: C.LEVEL_LABELS[levels], opts: cvOpts, groups },
               { onProgress: p2 => setBusy(true, '严格交叉验证 ' + p2 + '%'), timeoutMs: 240000 });
           } catch (e2) {
             if (e2.message !== 'NO_WORKER') throw e2;
-            cv = C.crossValidateStrict(rawX, yv, fnames, C.LEVEL_LABELS[levels], cvOpts);
+            cv = C.crossValidateStrict(rawX, yv, fnames, C.LEVEL_LABELS[levels], cvOpts, groups);
           }
           q.strict = cv;
           q.audit = cv.ok ? C.leakageAudit(cv, rawX, fnames) : null;
@@ -1972,6 +2014,76 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
     pane.appendChild(el('div', { class: 'muted', html:
       `参数快照：分位 ${r.meta.params.lowPct}/${r.meta.params.highPct} · 云滴 ${r.meta.params.drops} · 等级 ${r.meta.params.levels} · k=${r.meta.params.k} · 深度 ${r.meta.params.treeDepth} · 阈值 ${r.meta.params.netThreshold} · 种子 ${r.meta.params.seed}` }));
     pane.appendChild(el('pre', { text: r.report }));
+    renderHistory(pane);
+  }
+
+  /* ---------------- 历史版本（localStorage） ---------------- */
+  const HIST_KEY = 'dac-history-v1';
+  const HIST_MAX = 20;
+
+  function histLoad() {
+    try { return JSON.parse(localStorage.getItem(HIST_KEY) || '[]'); } catch (e) { return []; }
+  }
+  function histSave(list) {
+    try { localStorage.setItem(HIST_KEY, JSON.stringify(list.slice(0, HIST_MAX))); }
+    catch (e) { toast('历史记录已满或浏览器存储受限', 4000); }
+  }
+  function histPush(entry) {
+    const list = histLoad();
+    list.unshift(entry);
+    histSave(list);
+  }
+  function histClear() { localStorage.removeItem(HIST_KEY); }
+
+  function renderHistory(pane) {
+    const list = histLoad();
+    pane.appendChild(el('h3', { text: `历史记录（${list.length} / ${HIST_MAX}）`, style: 'margin-top:22px' }));
+    if (!list.length) {
+      pane.appendChild(el('div', { class: 'muted', text: '还没有记录。每次运行分析后会自动存一条快照（仅参数与指标，不含数据）。' }));
+      return;
+    }
+    const tb = el('table');
+    tb.appendChild(el('thead', { html:
+      '<tr><th>时间</th><th>数据集</th><th>目标</th><th>k</th><th>CV 准确率</th><th>轮廓</th><th>规则</th><th>操作</th></tr>' }));
+    const body = el('tbody');
+    list.forEach((h, i) => {
+      const d = new Date(h.at);
+      const time = `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+      const tr = el('tr', { html:
+        `<td>${time}</td><td>${esc(h.dataset || '-')}</td><td>${esc(h.target || '-')}</td>
+         <td>${h.k ?? '-'}</td><td>${h.cv != null ? (h.cv * 100).toFixed(1) + '%' : '-'}</td>
+         <td>${h.sil != null ? h.sil.toFixed(3) : '-'}</td><td>${h.rules ?? '-'}</td><td></td>` });
+      const btn = el('button', { class: 'ghost mini', text: '恢复参数' });
+      btn.onclick = () => {
+        if (h.params) {
+          const pp = h.params;
+          const setV = (id, val, labelId, fmt2) => {
+            if (val == null) return;
+            $('#' + id).value = val;
+            if (labelId) $('#' + labelId).textContent = fmt2 ? fmt2(val) : val;
+          };
+          setV('low', pp.lowPct, 'vLow', v => v + '%');
+          setV('high', pp.highPct, 'vHigh', v => v + '%');
+          setV('drops', pp.drops, 'vDrops');
+          setV('levels', pp.levels, 'vLevels');
+          setV('k', pp.k, 'vK');
+          setV('depth', pp.treeDepth, 'vDepth');
+          if (pp.netThreshold != null) {
+            $('#net').value = Math.round(pp.netThreshold * 100);
+            $('#vNet').textContent = pp.netThreshold.toFixed(2);
+          }
+          if (pp.seed != null) $('#seed').value = pp.seed;
+          toast('参数已恢复，请点「运行完整分析」重新计算');
+        }
+      };
+      tr.lastChild.appendChild(btn);
+      body.appendChild(tr);
+    });
+    tb.appendChild(body);
+    pane.appendChild(tb);
+    const bClear = el('button', { class: 'ghost mini', text: '清空历史', style: 'margin-top:8px' });
+    bClear.onclick = () => { histClear(); renderTab(); toast('已清空'); };
+    pane.appendChild(bClear);
   }
 
   /* ---------------- 项目管理（版本化 JSON） ---------------- */
