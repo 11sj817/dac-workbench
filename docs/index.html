@@ -253,6 +253,33 @@ button.mini,button.ghost{border-radius:4px}
   border:1px solid var(--line);background:var(--panel2);color:var(--txt);cursor:pointer;
 }
 #btnTheme:hover{border-color:var(--acc)}
+/* ---- 手机（≤600px）：禁止横向溢出 ---- */
+@media (max-width:600px){
+  html,body{overflow-x:hidden;max-width:100vw}
+  body{font-size:13.5px}
+  header{flex-wrap:wrap;gap:8px;padding:9px 12px}
+  header h1{font-size:15px}
+  .wrap{flex-direction:column !important;padding:0 10px !important;gap:10px}
+  .wrap > div{width:100% !important;min-width:0 !important}
+  #tabs{
+    position:static !important;width:auto !important;
+    flex-direction:row !important;overflow-x:auto;flex-wrap:nowrap;
+    padding:6px 0 !important;border-right:none !important;
+    border-bottom:1px solid var(--line);
+  }
+  #tabs button{flex:0 0 auto;white-space:nowrap;font-size:12px;padding:5px 9px}
+  .card{padding:10px !important;border-radius:5px}
+  table{font-size:12px}
+  #pane table, .tablewrap{display:block;overflow-x:auto;max-width:100%}
+  #pane svg{max-width:100% !important;height:auto !important;display:block}
+  .summary{font-size:12px}
+  .summary li{font-size:12px}
+  .stat{grid-template-columns:1fr 1fr !important}
+  .resultbar{flex-wrap:wrap;gap:6px}
+  input,select,textarea{max-width:100%}
+  .steps{display:none}
+}
+
 </style>
 </head>
 <body>
