@@ -94,3 +94,79 @@
 顶栏标签                鸢尾花（UCI Iris，150 条）
 console.error          0
 ```
+
+
+---
+
+# V2.9.2 AI 接入修复与聊天模式
+
+## 问题：填的模型名被 400 拒绝
+
+用户填 `DeepSeek-V4.1-Flash-1017`，服务端返回：
+
+```
+HTTP 400: The supported API model names are deepseek-flash, deepseek-v4-pro,
+but you passed DeepSeek-V4.1-Flash-1017.
+```
+
+**实测确认**（`GET https://api.deepseek.com/v1/models`）：该 Key 下可用模型只有
+`deepseek-flash` 与 `deepseek-v4-pro`。原先预设里的 `deepseek-chat` 也已不在列表中。
+
+## 修复
+
+| 项 | 改动 |
+|---|---|
+| 预设模型名 | DeepSeek 默认改为 `deepseek-flash`，候选补 `deepseek-flash / deepseek-v4-pro / deepseek-chat / deepseek-reasoner` |
+| **获取可用模型** | 模型输入框旁新增「获取」按钮，调 `GET /models` 列出该 Key 真能用的模型，并直接给下拉选择 |
+| 填错即时提醒 | 若当前填写的模型不在拉取列表里，立刻标黄提示「很可能会 400」 |
+| 400 精确诊断 | 从错误体里解析 `supported API model names are ...`，直接把可用名单显示给用户 |
+
+## 推理模型的空回复
+
+`deepseek-flash` / `deepseek-v4-pro` 会把 token 花在 `reasoning_content` 上。
+`max_tokens=1400` 时可能拿到**空 content**（实测 `max_tokens=20` 必空）。
+
+修复：
+- `max_tokens` 提到 2500
+- 空回复时区分两种情况给明确提示：
+  - 有 reasoning 无 content → "模型只输出了推理过程，max_tokens 被 thinking 消耗完了"
+  - 两者都空 → "返回空内容，增大 max_tokens 或换模型"
+
+## 聊天模式
+
+原来是「点按钮 → 单次问答」。「对话」改为多轮：
+
+- 气泡式消息列（用户右对齐蓝底、助手左对齐深底）
+- `Enter` 发送 / `Shift+Enter` 换行
+- 保留最近 8 轮上下文
+- **分析结果 JSON 只挂在最后一条用户消息上**，避免每轮重复传大 payload
+- 每条助手消息下方显示 `耗时 · 数字溯源结果`（未命中的数字会列出来）
+- 4 个快捷指令：这能写进论文吗 / 解读这份结果 / 为什么稳定性不高 / 下一步做什么
+- 「清空对话」
+
+## 提示词重写
+
+从"给建议"改成**科研四段式**，并加入硬约束：
+
+```
+1. 只能使用 JSON 中出现的数字，不得编造、不得估算
+2. 不得自己重算统计量
+3. 稳定性 ≠ 准确率；相关 ≠ 因果；边频率 ≠ 因果概率
+4. 有 leakFeatures 必须放在最前面指出
+5. 未做统计检验时不要用"显著"
+输出：【结论】【依据】【局限】【下一步】
+```
+
+## 实测（真实 Key，deepseek-flash）
+
+```
+获取可用模型   → 可用 2 个：deepseek-flash、deepseek-v4-pro
+测试连接       → 成功 · 1248ms · 返回「可用」
+问「这能写进论文吗」→ 10 秒返回四段式，数字全部可溯源
+console.error  → 0
+```
+
+回答节选（证明约束生效）：
+
+> 【局限】全流程没有做任何统计检验，JSON 中无 p 值、无置信区间，因此不能声称任何差异或重要性"显著"。
+> 【依据】轮廓系数 0.4424，簇结构中等偏强；但 k=3 是预设参数，JSON 中没有任何其他 k 的对照值，无法说明 3 是最优划分。

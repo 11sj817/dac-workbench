@@ -1973,15 +1973,42 @@
   /* ---------------- AI 助手（可选 API 接入） ---------------- */
   const AI_KEY = 'dac-workbench-ai';
   const PROVIDERS = {
-    deepseek: { name: 'DeepSeek', base: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
-    openai: { name: 'OpenAI', base: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
-    dashscope: { name: '通义千问', base: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus' },
-    moonshot: { name: '月之暗面 Kimi', base: 'https://api.moonshot.cn/v1', model: 'moonshot-v1-8k' },
-    zhipu: { name: '智谱 GLM', base: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-flash' },
-    siliconflow: { name: '硅基流动', base: 'https://api.siliconflow.cn/v1', model: 'Qwen/Qwen2.5-7B-Instruct' },
-    relay: { name: '中转站（自定义）', base: '', model: '' },
-    custom: { name: '自定义', base: '', model: '' }
+    deepseek: {
+      name: 'DeepSeek', base: 'https://api.deepseek.com/v1', model: 'deepseek-flash',
+      // 服务商实际接受的模型名以 /models 接口为准，这里只是常见候选
+      models: ['deepseek-flash', 'deepseek-v4-pro', 'deepseek-chat', 'deepseek-reasoner']
+    },
+    openai: { name: 'OpenAI', base: 'https://api.openai.com/v1', model: 'gpt-4o-mini',
+      models: ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini'] },
+    dashscope: { name: '通义千问', base: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus',
+      models: ['qwen-plus', 'qwen-max', 'qwen-turbo'] },
+    moonshot: { name: '月之暗面 Kimi', base: 'https://api.moonshot.cn/v1', model: 'moonshot-v1-8k',
+      models: ['moonshot-v1-8k', 'moonshot-v1-32k', 'kimi-k2-0905-preview'] },
+    zhipu: { name: '智谱 GLM', base: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-flash',
+      models: ['glm-4-flash', 'glm-4-plus', 'glm-4-air'] },
+    siliconflow: { name: '硅基流动', base: 'https://api.siliconflow.cn/v1', model: 'Qwen/Qwen2.5-7B-Instruct',
+      models: ['Qwen/Qwen2.5-7B-Instruct', 'deepseek-ai/DeepSeek-V3'] },
+    relay: { name: '中转站（自定义）', base: '', model: '', models: [] },
+    custom: { name: '自定义', base: '', model: '', models: [] }
   };
+
+  /** 拉取服务商实际可用的模型列表（GET /models，OpenAI 兼容） */
+  async function fetchModels(base, key) {
+    const b = String(base || '').replace(/\/+$/, '');
+    if (!b) throw new Error('先填 Base URL');
+    if (!key) throw new Error('先填 API Key');
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 20000);
+    try {
+      const res = await fetch(b + '/models', { headers: { Authorization: 'Bearer ' + key }, signal: ctrl.signal });
+      const txt = await res.text();
+      if (!res.ok) throw new Error('HTTP ' + res.status + '：' + txt.slice(0, 200));
+      let j;
+      try { j = JSON.parse(txt); } catch (e) { throw new Error('返回不是 JSON：' + txt.slice(0, 120)); }
+      const arr = j.data || j.models || [];
+      return arr.map(m => (typeof m === 'string' ? m : m.id || m.name)).filter(Boolean);
+    } finally { clearTimeout(timer); }
+  }
 
   function diagnose(e) {
     const m = String(e && e.message || e);
@@ -1989,6 +2016,12 @@
       return '浏览器直连被拦（CORS 或网络）。这个服务商可能不允许前端直调，换 DeepSeek 官方，或用支持 CORS 的中转站。';
     }
     if (/\b401\b/.test(m)) return 'Key 无效或已过期（401）。';
+    // DeepSeek 这类服务商会在 400 里直接告诉你能用哪些模型
+    if (/\b400\b/.test(m) && /model/i.test(m)) {
+      const sup = /supported API model names are ([^.)]+)/i.exec(m);
+      if (sup) return `模型名不对。该服务商实际支持：<code>${esc(sup[1].replace(/,\s*/g, '</code> <code>'))}</code> —— 改成其中之一即可（点「获取可用模型」可自动列出）。`;
+      return '模型名不被接受（400）。点「获取可用模型」看服务商实际提供哪些。';
+    }
     if (/\b403\b/.test(m)) return 'Key 没有该模型权限，或地区受限（403）。';
     if (/\b404\b/.test(m)) return 'Base URL 或模型名不对（404）。检查是不是漏了 /v1。';
     if (/\b429\b/.test(m)) return '触发限流或余额不足（429）。';
@@ -2119,9 +2152,55 @@
     selP.onchange = () => {
       const v = PROVIDERS[selP.value];
       inBase.value = v.base; inModel.value = v.model;
+      modelHints.innerHTML = '';
+      if (v.models && v.models.length) {
+        modelHints.appendChild(el('span', { text: '常见模型：' }));
+        const sel = el('select', { style: 'margin-left:4px;font-size:11px;padding:2px 4px' });
+        sel.appendChild(el('option', { value: '', text: '— 选一个 —' }));
+        v.models.forEach(id => sel.appendChild(el('option', { value: id, text: id })));
+        sel.onchange = () => { if (sel.value) inModel.value = sel.value; };
+        modelHints.appendChild(sel);
+      }
     };
     grid.appendChild(el('div', {}, [el('div', { class: 'muted', text: '服务商' }), selP]));
-    grid.appendChild(el('div', {}, [el('div', { class: 'muted', text: '模型' }), inModel]));
+    // 模型：输入框 + 一键拉取可用列表
+    const modelRow = el('div', { style: 'display:flex;gap:6px' });
+    modelRow.appendChild(inModel);
+    const bModels = el('button', { class: 'ghost mini', text: '获取', title: '调用 GET /models 列出该 Key 可用的模型', style: 'white-space:nowrap' });
+    modelRow.appendChild(bModels);
+    const modelHints = el('div', { class: 'muted', style: 'font-size:11px;margin-top:4px' });
+    bModels.onclick = async () => {
+      bModels.disabled = true;
+      bModels.textContent = '…';
+      modelHints.textContent = '正在查询…';
+      try {
+        const list = await fetchModels(inBase.value.trim(), inKey.value.trim());
+        if (!list.length) { modelHints.textContent = '该接口没有返回模型列表'; }
+        else {
+          modelHints.innerHTML = '';
+          modelHints.appendChild(el('span', { text: `可用 ${list.length} 个：` }));
+          const sel = el('select', { style: 'margin-left:4px;font-size:11px;padding:2px 4px' });
+          sel.appendChild(el('option', { value: '', text: '— 选一个 —' }));
+          list.forEach(id => {
+            const o = el('option', { value: id, text: id });
+            if (id === inModel.value.trim()) o.selected = true;
+            sel.appendChild(o);
+          });
+          sel.onchange = () => { if (sel.value) inModel.value = sel.value; };
+          modelHints.appendChild(sel);
+          // 当前填的值不在列表里就立刻提示
+          if (inModel.value.trim() && !list.includes(inModel.value.trim())) {
+            modelHints.appendChild(el('div', { style: 'color:#f5c66b;margin-top:3px',
+              text: `⚠ 当前填的「${inModel.value.trim()}」不在可用列表里，很可能会 400` }));
+          }
+        }
+      } catch (e) {
+        modelHints.textContent = '查询失败：' + diagnose(e);
+      }
+      bModels.disabled = false;
+      bModels.textContent = '获取';
+    };
+    grid.appendChild(el('div', {}, [el('div', { class: 'muted', text: '模型' }), modelRow, modelHints]));
     grid.appendChild(el('div', {}, [el('div', { class: 'muted', text: 'Base URL' }), inBase]));
     grid.appendChild(el('div', {}, [el('div', { class: 'muted', text: 'API Key' }), inKey]));
     box.appendChild(grid);
@@ -2318,6 +2397,126 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
       out.className = 'ai-msg';
       out.textContent = txt;
     }));
+
+    /* ---------- 聊天模式（多轮，带上下文） ---------- */
+    const SYS_PROMPT = [
+      '你是 DAC（数据驱动分析方法）的科研分析助手。用户给你的是**已经算好的**分析结果，不是原始数据。',
+      '',
+      '硬性规则：',
+      '1. 只能使用给定 JSON 中出现的数字。不得编造、不得估算、不得写"大约/左右"。',
+      '2. 不得自己重新计算统计量（相关系数、准确率、p 值等）。',
+      '3. 稳定性 ≠ 准确率；相关 ≠ 因果；边频率 ≠ 因果概率。',
+      '4. 若结果里有 leakFeatures（疑似特征泄漏），必须在最前面指出。',
+      '5. 未做统计检验时，不要用"显著"这个词。',
+      '',
+      '输出结构（严格遵守，中文，不要多余的客套）：',
+      '【结论】一到两句，直接说这批数据支持什么结论。',
+      '【依据】2~4 条，每条必须带一个来自 JSON 的具体数值，例如「轮廓系数 0.204（偏弱）」。',
+      '【局限】至少 1 条，说明这次分析**不能**证明什么。',
+      '【下一步】1~2 条可执行建议（调参数 / 补数据 / 换方法）。'
+    ].join('\n');
+
+    const chat = S.extra.chat || (S.extra.chat = []);
+    const chatCard = el('div', { class: 'card', style: 'margin-top:14px;background:#0f1a24' });
+    chatCard.appendChild(el('h3', { text: '对话（可追问，带上下文）', style: 'margin-bottom:8px;font-size:12px' }));
+
+    const stream = el('div', {
+      style: 'max-height:440px;overflow:auto;display:flex;flex-direction:column;gap:10px;padding:4px 2px;margin-bottom:10px'
+    });
+    const renderChat = () => {
+      stream.innerHTML = '';
+      if (!chat.length) {
+        stream.appendChild(el('div', { class: 'muted', style: 'text-align:center;padding:24px 0', html:
+          '还没有对话。可以直接问，例如：<br>' +
+          '「这组结论能写进论文吗」「k=3 和 k=4 该选哪个」「为什么轮廓只有 0.2」' }));
+      }
+      chat.forEach(m => {
+        const isUser = m.role === 'user';
+        const row = el('div', { style: 'display:flex;justify-content:' + (isUser ? 'flex-end' : 'flex-start') });
+        const bubble = el('div', {
+          style: 'max-width:88%;padding:10px 12px;border-radius:12px;font-size:13px;line-height:1.7;' +
+            'white-space:pre-wrap;word-break:break-word;' +
+            (isUser
+              ? 'background:#1b4a72;border:1px solid #2a6ea8;color:#eaf4ff;border-bottom-right-radius:4px'
+              : 'background:#131f2b;border:1px solid var(--line);color:var(--txt);border-bottom-left-radius:4px')
+        });
+        bubble.textContent = m.content;
+        if (m.meta) {
+          bubble.appendChild(el('div', { class: 'muted',
+            style: 'font-size:11px;margin-top:7px;border-top:1px dashed var(--line);padding-top:5px',
+            text: m.meta }));
+        }
+        row.appendChild(bubble);
+        stream.appendChild(row);
+      });
+      stream.scrollTop = stream.scrollHeight;
+    };
+    renderChat();
+    chatCard.appendChild(stream);
+
+    const inputRow = el('div', { style: 'display:flex;gap:8px;align-items:flex-end' });
+    const ta = el('textarea', {
+      rows: '2', placeholder: '问点什么…（Enter 发送，Shift+Enter 换行）',
+      style: 'flex:1;resize:vertical;min-height:46px;padding:10px 12px;background:#0b141d;' +
+        'border:1px solid var(--line);border-radius:9px;color:var(--txt);font-size:13px;font-family:inherit'
+    });
+    const bSend = el('button', { class: 'mini', text: '发送' });
+    inputRow.appendChild(ta);
+    inputRow.appendChild(bSend);
+    chatCard.appendChild(inputRow);
+
+    const send = async (text) => {
+      const q2 = String(text || '').trim();
+      if (!q2) return;
+      chat.push({ role: 'user', content: q2 });
+      renderChat();
+      bSend.disabled = true;
+      bSend.textContent = '…';
+      ta.value = '';
+      try {
+        // 结果 JSON 只挂在最后一条用户消息上，避免每轮重复传大 payload
+        const ctx = '\n\n【分析结果 JSON】\n' + JSON.stringify(brief(), null, 1);
+        const hist = chat.slice(-8, -1).map(m => ({ role: m.role, content: m.content }));
+        const msgs = [{ role: 'system', content: SYS_PROMPT }]
+          .concat(hist)
+          .concat([{ role: 'user', content: q2 + ctx }]);
+        const t0 = performance.now();
+        const txt2 = await callLLM(msgs);
+        const ms = Math.round(performance.now() - t0);
+        let bad = [];
+        try { bad = auditNumbers(txt2, r) || []; } catch (e) { bad = []; }
+        const meta = `${ms}ms · ` + (bad.length
+          ? `${bad.length} 个数字未在结果中找到：${bad.slice(0, 4).join(', ')}`
+          : '数字溯源通过');
+        chat.push({ role: 'assistant', content: txt2, meta });
+      } catch (e) {
+        chat.push({ role: 'assistant', content: '⚠ ' + diagnose(e) + '\n' + String(e.message).slice(0, 320), meta: '请求失败' });
+      }
+      bSend.disabled = false;
+      bSend.textContent = '发送';
+      renderChat();
+    };
+    bSend.onclick = () => send(ta.value);
+    ta.onkeydown = e => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(ta.value); }
+    };
+
+    const quick = el('div', { style: 'display:flex;gap:6px;flex-wrap:wrap;margin-top:9px' });
+    [
+      ['这能写进论文吗', '按审稿人视角评估：这份分析能支撑什么结论、有哪些硬伤、还缺什么。'],
+      ['解读这份结果', '把这份结果写成一段能放进论文的中文，不要夸大，不要用"显著"。'],
+      ['为什么稳定性不高', '结合轮廓系数、CV、规则数量，解释稳定性偏低的可能原因。'],
+      ['下一步做什么', '基于当前结果，给出 3 条最值得做的后续分析，按性价比排序。']
+    ].forEach(([label, prompt]) => {
+      const b = el('button', { class: 'ghost mini', text: label });
+      b.onclick = () => send(prompt);
+      quick.appendChild(b);
+    });
+    const bClearChat = el('button', { class: 'ghost mini', text: '清空对话' });
+    bClearChat.onclick = () => { chat.length = 0; renderChat(); };
+    quick.appendChild(bClearChat);
+    chatCard.appendChild(quick);
+    pane.appendChild(chatCard);
 
     pane.appendChild(acts);
     pane.appendChild(out);
