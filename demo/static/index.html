@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>DAC-Next · 数据分析实验台</title>
+<style>
+  :root{
+    --bg:#0a1017; --panel:#111a24; --panel2:#16222e; --line:#22313f;
+    --txt:#dfe9f3; --dim:#8aa0b4; --acc:#4c9aff; --acc2:#22d3ee; --warn:#f59e0b; --bad:#ef4444; --ok:#34d399;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(1200px 600px at 80% -10%,#12263a 0%,var(--bg) 55%);
+       color:var(--txt);font:14px/1.6 "Segoe UI","Microsoft YaHei",system-ui,sans-serif}
+  header{display:flex;align-items:center;gap:14px;padding:14px 22px;border-bottom:1px solid var(--line);
+         background:linear-gradient(90deg,#0d1722,#111c28);position:sticky;top:0;z-index:9}
+  header h1{font-size:16px;margin:0;letter-spacing:.5px}
+  header h1 b{color:var(--acc2)}
+  .tag{font-size:11px;color:var(--dim);border:1px solid var(--line);padding:2px 8px;border-radius:20px}
+  .grow{flex:1}
+  .wrap{display:grid;grid-template-columns:330px 1fr;gap:16px;padding:16px 22px 40px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px}
+  .card h3{margin:0 0 10px;font-size:13px;color:var(--acc);letter-spacing:.4px;font-weight:600}
+  .card h3 span{color:var(--dim);font-weight:400;font-size:11px;margin-left:6px}
+  label.row{display:flex;justify-content:space-between;align-items:center;gap:8px;margin:7px 0;font-size:12.5px;color:var(--dim)}
+  label.row b{color:var(--txt);font-variant-numeric:tabular-nums}
+  input[type=range]{width:120px;accent-color:var(--acc)}
+  select,input[type=number],input[type=text]{background:var(--panel2);color:var(--txt);border:1px solid var(--line);
+      border-radius:8px;padding:6px 8px;font-size:12.5px;width:100%}
+  button{background:linear-gradient(180deg,#1d7fe0,#1663b5);color:#fff;border:0;border-radius:9px;
+         padding:10px 14px;font-size:13px;cursor:pointer;transition:.15s;font-weight:600}
+  button:hover{filter:brightness(1.12)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  button.ghost{background:transparent;border:1px solid var(--line);color:var(--txt)}
+  .drop{border:1.5px dashed #2b4055;border-radius:10px;padding:18px;text-align:center;color:var(--dim);
+        cursor:pointer;transition:.15s;font-size:12.5px}
+  .drop:hover,.drop.hot{border-color:var(--acc);color:var(--acc);background:#0f1d2b}
+  .tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
+  .tabs button{background:var(--panel2);border:1px solid var(--line);color:var(--dim);padding:7px 12px;font-size:12.5px;font-weight:500}
+  .tabs button.on{color:#fff;border-color:var(--acc);background:#12283d}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:right}
+  th:first-child,td:first-child{text-align:left}
+  th{color:var(--dim);font-weight:500;font-size:11.5px}
+  tbody tr:hover{background:#13202c}
+  .pill{display:inline-block;padding:1px 7px;border-radius:20px;font-size:11px}
+  .pill.ok{background:#0d3b2e;color:var(--ok)} .pill.warn{background:#3b2c0d;color:var(--warn)}
+  .pill.bad{background:#3b1214;color:#fca5a5}
+  .muted{color:var(--dim);font-size:12px}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .rule{background:var(--panel2);border-left:3px solid var(--acc2);border-radius:8px;padding:9px 12px;margin:8px 0;font-size:12.5px}
+  .rule code{color:var(--acc2)}
+  .rule .meta{color:var(--dim);font-size:11px;margin-top:4px}
+  pre{background:#0c1520;border:1px solid var(--line);border-radius:10px;padding:14px;overflow:auto;
+      font-size:12px;line-height:1.7;white-space:pre-wrap;color:#cfe3f5;max-height:640px}
+  .bar{height:9px;background:#1b2a38;border-radius:6px;overflow:hidden}
+  .bar i{display:block;height:100%;background:linear-gradient(90deg,var(--acc),var(--acc2))}
+  svg{max-width:100%;height:auto;display:block}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:11.5px;color:var(--dim);margin-top:6px}
+  .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px}
+  .toast{position:fixed;right:20px;bottom:20px;background:#1b2a38;border:1px solid var(--line);
+         border-radius:10px;padding:10px 14px;font-size:12.5px;opacity:0;transform:translateY(8px);transition:.2s;z-index:99}
+  .toast.on{opacity:1;transform:none}
+  .stat{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+  .stat div{background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:8px 12px;flex:1;min-width:110px}
+  .stat span{display:block;color:var(--dim);font-size:11px}
+  .stat b{font-size:16px;font-variant-numeric:tabular-nums}
+  .loading{height:3px;background:#16222e;overflow:hidden;border-radius:3px}
+  .loading i{display:block;height:100%;width:35%;background:var(--acc);animation:mv 1s infinite linear}
+  @keyframes mv{0%{margin-left:-35%}100%{margin-left:100%}}
+</style>
+</head>
+<body>
+<header>
+  <h1>DAC-<b>Next</b> 数据分析实验台</h1>
+  <span class="tag">analysis-core 0.1</span>
+  <span class="tag">纯函数 · 可复算</span>
+  <div class="grow"></div>
+  <span class="tag" id="svc">服务检测中…</span>
+</header>
+
+<div class="wrap">
+  <!-- 左栏 -->
+  <div>
+    <div class="card">
+      <h3>1 · 数据 <span>xlsx / csv</span></h3>
+      <div class="drop" id="drop">点击或拖入文件<br><span class="muted">前 n-1 列为条件变量，最后一列为决策变量</span></div>
+      <input type="file" id="file" accept=".xlsx,.xls,.csv" hidden />
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <button class="ghost" id="btnSample" style="flex:1">载入示例企业数据</button>
+      </div>
+      <div class="muted" id="dsInfo" style="margin-top:8px">未载入数据</div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <h3>2 · 变量角色</h3>
+      <label class="row">决策变量（y）</label>
+      <select id="target"></select>
+      <label class="row" style="margin-top:10px">条件变量（x）<span id="facCount"></span></label>
+      <div id="factors" style="max-height:150px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:8px"></div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <h3>3 · 参数 <span>影响结论，报告会记录</span></h3>
+      <label class="row">下分位数 <b id="vLow">25%</b></label><input type="range" id="low" min="1" max="49" value="25" style="width:100%">
+      <label class="row">上分位数 <b id="vHigh">75%</b></label><input type="range" id="high" min="51" max="99" value="75" style="width:100%">
+      <label class="row">云滴数量 <b id="vDrops">500</b></label><input type="range" id="drops" min="100" max="1000" step="50" value="500" style="width:100%">
+      <label class="row">离散等级 <b id="vLevels">3</b></label><input type="range" id="levels" min="2" max="4" value="3" style="width:100%">
+      <label class="row">聚类 k <b id="vK">3</b></label><input type="range" id="k" min="2" max="6" value="3" style="width:100%">
+      <label class="row">树深度 <b id="vDepth">3</b></label><input type="range" id="depth" min="1" max="4" value="3" style="width:100%">
+      <label class="row">网络阈值 |r| <b id="vNet">0.20</b></label><input type="range" id="net" min="5" max="70" value="20" style="width:100%">
+      <label class="row">随机种子</label><input type="number" id="seed" value="42" />
+      <button id="btnRun" style="width:100%;margin-top:12px" disabled>运行完整分析</button>
+      <div class="loading" id="loadbar" style="margin-top:10px;visibility:hidden"><i></i></div>
+    </div>
+  </div>
+
+  <!-- 右栏 -->
+  <div>
+    <div class="card">
+      <div class="tabs" id="tabs">
+        <button data-tab="profile" class="on">数据体检</button>
+        <button data-tab="calib">云模型校准</button>
+        <button data-tab="scene">异质性分型</button>
+        <button data-tab="rules">组合效应规则</button>
+        <button data-tab="net">影响机制网络</button>
+        <button data-tab="report">研究报告</button>
+      </div>
+      <div id="pane"><div class="muted">载入数据后，这里显示数据体检结果。</div></div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const S = { datasetId:null, columns:[], profile:null, result:null, tab:'profile' };
+const $ = s => document.querySelector(s);
+const el = (t, a = {}, kids = []) => {
+  const n = document.createElement(t);
+  for (const k in a) {
+    if (k === 'class') n.className = a[k];
+    else if (k === 'html') n.innerHTML = a[k];
+    else if (k === 'text') n.textContent = a[k];
+    else if (k.startsWith('on')) n.addEventListener(k.slice(2), a[k]);
+    else n.setAttribute(k, a[k]);
+  }
+  (Array.isArray(kids) ? kids : [kids]).forEach(k => k && n.appendChild(k));
+  return n;
+};
+const fmt = (v, d = 3) => {
+  if (v === null || v === undefined || Number.isNaN(v)) return '-';
+  if (typeof v !== 'number') return v;
+  if (Number.isInteger(v)) return String(v);
+  return Math.abs(v) >= 1000 ? v.toFixed(0) : v.toFixed(d);
+};
+function toast(msg, ms = 2600) {
+  const t = $('#toast'); t.textContent = msg; t.classList.add('on');
+  clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('on'), ms);
+}
+async function api(path, opt) {
+  const r = await fetch(path, opt);
+  const txt = await r.text();
+  let j; try { j = JSON.parse(txt); } catch (e) { throw new Error(txt.slice(0, 200)); }
+  if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
+  return j;
+}
+function svg(w, h) {
+  const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  s.setAttribute('viewBox', `0 0 ${w} ${h}`); s.setAttribute('width', w); s.setAttribute('height', h);
+  return s;
+}
+function mk(tag, attrs) {
+  const n = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const k in attrs) n.setAttribute(k, attrs[k]);
+  return n;
+}
+const PAL = ['#4c9aff', '#22d3ee', '#f59e0b', '#a78bfa', '#34d399', '#f472b6'];
+
+/* ---------------- 服务检测 ---------------- */
+(async () => {
+  try { const h = await api('/api/health'); $('#svc').textContent = '在线 · v' + h.version; }
+  catch (e) { $('#svc').textContent = '离线'; }
+})();
+
+/* ---------------- 数据载入 ---------------- */
+$('#drop').onclick = () => $('#file').click();
+$('#file').onchange = e => { if (e.target.files[0]) upload(e.target.files[0]); };
+['dragover', 'dragenter'].forEach(ev => $('#drop').addEventListener(ev, e => { e.preventDefault(); $('#drop').classList.add('hot'); }));
+['dragleave', 'drop'].forEach(ev => $('#drop').addEventListener(ev, e => { e.preventDefault(); $('#drop').classList.remove('hot'); }));
+$('#drop').addEventListener('drop', e => { const f = e.dataTransfer.files[0]; if (f) upload(f); });
+$('#btnSample').onclick = () => loadSample();
+
+async function upload(file) {
+  const fd = new FormData(); fd.append('file', file);
+  $('#dsInfo').textContent = '上传中…';
+  try {
+    const j = await api('/api/upload', { method: 'POST', body: fd });
+    applyDataset(j, file.name);
+    toast('数据已载入：' + file.name);
+  } catch (e) { $('#dsInfo').textContent = '失败'; toast('上传失败：' + e.message); }
+}
+async function loadSample() {
+  $('#dsInfo').textContent = '载入示例…';
+  try { const j = await api('/api/sample'); applyDataset(j, j.name); toast('已载入示例数据'); }
+  catch (e) { $('#dsInfo').textContent = '失败'; toast('载入失败：' + e.message); }
+}
+function applyDataset(j, name) {
+  S.datasetId = j.dataset_id; S.columns = j.columns; S.profile = j.profile; S.result = null;
+  $('#dsInfo').innerHTML = `<b>${name}</b><br>${j.rows} 行 · ${j.columns.length} 列`;
+  const t = $('#target'); t.innerHTML = '';
+  j.columns.forEach(c => t.appendChild(el('option', { value: c, text: c })));
+  t.value = j.columns[j.columns.length - 1];
+  t.onchange = () => renderFactorList();
+  renderFactorList();
+  $('#btnRun').disabled = false;
+  setTab('profile'); renderProfile();
+}
+function renderFactorList() {
+  const box = $('#factors'); box.innerHTML = '';
+  const target = $('#target').value;
+  S.columns.filter(c => c !== target).forEach(c => {
+    const cb = el('input', { type: 'checkbox', checked: 'checked', value: c });
+    cb.style.marginRight = '6px';
+    box.appendChild(el('label', { class: 'row', style: 'margin:4px 0;cursor:pointer' }, [cb, el('span', { text: c })]));
+  });
+  $('#facCount').textContent = '(' + (S.columns.length - 1) + ')';
+}
+function pickedFactors() {
+  return [...document.querySelectorAll('#factors input:checked')].map(i => i.value);
+}
+
+/* ---------------- 参数 ---------------- */
+[['low','vLow','%'],['high','vHigh','%'],['drops','vDrops',''],['levels','vLevels',''],
+ ['k','vK',''],['depth','vDepth','']].forEach(([id, out, suf]) => {
+  const s = $('#' + id); s.oninput = () => { $('#' + out).textContent = s.value + suf; };
+});
+$('#net').oninput = () => { $('#vNet').textContent = (Number($('#net').value) / 100).toFixed(2); };
+
+/* ---------------- 运行 ---------------- */
+$('#btnRun').onclick = async () => {
+  const factors = pickedFactors();
+  if (!factors.length) return toast('至少选择一个条件变量');
+  const body = {
+    dataset_id: S.datasetId, target: $('#target').value, factors,
+    low_pct: +$('#low').value, high_pct: +$('#high').value,
+    drops: +$('#drops').value, levels: +$('#levels').value,
+    k: +$('#k').value, tree_depth: +$('#depth').value,
+    net_threshold: +$('#net').value / 100, seed: +$('#seed').value
+  };
+  $('#btnRun').disabled = true; $('#loadbar').style.visibility = 'visible';
+  const t0 = performance.now();
+  try {
+    const j = await api('/api/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    S.result = j.result;
+    const dt = ((performance.now() - t0) / 1000).toFixed(2);
+    toast(`完成：${dt}s · 运行号 ${j.result.run_id}`);
+    setTab('scene'); renderTab();
+  } catch (e) { toast('运行失败：' + e.message, 5000); }
+  $('#btnRun').disabled = false; $('#loadbar').style.visibility = 'hidden';
+};
+
+/* ---------------- Tab ---------------- */
+$('#tabs').onclick = e => { const b = e.target.closest('button'); if (!b) return; setTab(b.dataset.tab); };
+function setTab(t) {
+  S.tab = t;
+  [...document.querySelectorAll('#tabs button')].forEach(b => b.classList.toggle('on', b.dataset.tab === t));
+  renderTab();
+}
+function renderTab() {
+  const p = $('#pane');
+  if (!S.result && !['profile'].includes(S.tab)) {
+    p.innerHTML = '<div class="muted">先点「运行完整分析」。</div>'; return;
+  }
+  ({ profile: renderProfile, calib: renderCalib, scene: renderScene,
+     rules: renderRules, net: renderNet, report: renderReport })[S.tab]();
+}
+
+/* ---------------- 渲染：数据体检 ---------------- */
+function renderProfile() {
+  const p = $('#pane');
+  if (!S.profile) { p.innerHTML = '<div class="muted">未载入数据。</div>'; return; }
+  const pr = S.profile;
+  p.innerHTML = '';
+  const st = el('div', { class: 'stat' }, [
+    el('div', { html: `<span>样本量</span><b>${pr.rows}</b>` }),
+    el('div', { html: `<span>变量数</span><b>${pr.cols}</b>` }),
+    el('div', { html: `<span>重复行</span><b>${pr.duplicates}</b>` }),
+    el('div', { html: `<span>变量警告</span><b>${pr.warnings.length}</b>` }),
+  ]);
+  p.appendChild(st);
+  const tb = el('table');
+  tb.appendChild(el('thead', { html: '<tr><th>变量</th><th>类型</th><th>缺失</th><th>中位数</th><th>标准差</th><th>异常值(IQR)</th><th>偏度</th></tr>' }));
+  const body = el('tbody');
+  pr.columns.forEach(c => body.appendChild(el('tr', { html:
+    `<td>${c.name}</td><td><span class="pill ${c.dtype === 'numeric' ? 'ok' : 'warn'}">${c.dtype}</span></td>
+     <td>${c.missing}</td><td>${fmt(c.median)}</td><td>${fmt(c.std)}</td>
+     <td>${c.outliers ?? '-'}</td><td>${fmt(c.skew, 2)}</td>` })));
+  tb.appendChild(body); p.appendChild(tb);
+  if (pr.warnings.length) {
+    p.appendChild(el('h3', { text: '体检提示', style: 'margin-top:16px' }));
+    pr.warnings.forEach(w => p.appendChild(el('div', { class: 'rule', text: w })));
+  }
+}
+
+/* ---------------- 渲染：校准 ---------------- */
+function renderCalib() {
+  const p = $('#pane'), r = S.result; p.innerHTML = '';
+  const cal = r.calibration;
+  p.appendChild(el('div', { class: 'muted', html:
+    `云模型：分位定标 → 多云隶属度 → 等级编码。平均隶属度越高说明分级越清晰；歧义率（最高与次高隶属度差 &lt; 0.15 的样本占比）越低越好。` }));
+  const names = Object.keys(cal.factors);
+  const tb = el('table');
+  tb.appendChild(el('thead', { html: '<tr><th>变量</th><th>等级分布</th><th>切点</th><th>平均隶属度</th><th>歧义率</th></tr>' }));
+  const body = el('tbody');
+  names.concat(['__y__']).forEach(n => {
+    const s = n === '__y__' ? cal.target : cal.factors[n];
+    const label = n === '__y__' ? (r.meta.target + '（y）') : n;
+    const bars = s.counts.map((c, i) =>
+      `<div style="display:inline-block;width:56px;margin-right:4px"><div class="bar"><i style="width:${Math.round(100 * c / Math.max(...s.counts))}%;background:${PAL[i]}"></i></div>
+       <span class="muted" style="font-size:10.5px">${c}</span></div>`).join('');
+    body.appendChild(el('tr', { html:
+      `<td>${label}</td><td style="text-align:left">${bars}</td>
+       <td>${s.thresholds.map(t => fmt(t, 2)).join(' / ')}</td>
+       <td>${fmt(s.stats.mean_mu, 3)}</td><td>${(s.stats.ambiguous_rate * 100).toFixed(1)}%</td>` }));
+  });
+  tb.appendChild(body); p.appendChild(tb);
+
+  // 归属度曲线（用首个变量的云参数示意）
+  const first = names[0];
+  if (first) {
+    const s = cal.factors[first];
+    const w = 720, h = 210, pad = 34;
+    const g = svg(w, h);
+    const lo = Math.min(...s.clouds.map(c => c.Ex - 3 * c.En));
+    const hi = Math.max(...s.clouds.map(c => c.Ex + 3 * c.En));
+    const X = v => pad + (v - lo) / (hi - lo || 1) * (w - pad * 2);
+    const Y = m => h - pad - m * (h - pad * 2);
+    g.appendChild(mk('line', { x1: pad, y1: h - pad, x2: w - pad, y2: h - pad, stroke: '#22313f' }));
+    g.appendChild(mk('line', { x1: pad, y1: pad, x2: pad, y2: h - pad, stroke: '#22313f' }));
+    s.clouds.forEach((c, i) => {
+      let d = '';
+      for (let t = 0; t <= 100; t++) {
+        const x = lo + (hi - lo) * t / 100;
+        const mu = Math.exp(-((x - c.Ex) ** 2) / (2 * c.En ** 2));
+        d += (t ? 'L' : 'M') + X(x).toFixed(1) + ' ' + Y(mu).toFixed(1);
+      }
+      g.appendChild(mk('path', { d, fill: 'none', stroke: PAL[i], 'stroke-width': 2 }));
+      const tx = mk('text', { x: X(c.Ex), y: h - 12, fill: PAL[i], 'font-size': 11, 'text-anchor': 'middle' });
+      tx.textContent = c.label + ` (Ex=${fmt(c.Ex, 2)})`;
+      g.appendChild(tx);
+    });
+    p.appendChild(el('h3', { text: `隶属度函数：${first}`, style: 'margin-top:18px' }));
+    p.appendChild(g);
+    p.appendChild(el('div', { class: 'muted', text: `En = 半区间/(3×等级数)，He = En/10，云滴 Monte Carlo ${r.meta.params.drops} 次。` }));
+  }
+}
+
+/* ---------------- 渲染：分型 ---------------- */
+function renderScene() {
+  const p = $('#pane'), r = S.result; p.innerHTML = '';
+  const sc = r.scenarios;
+  p.appendChild(el('div', { class: 'stat' }, [
+    el('div', { html: `<span>聚类 k</span><b>${sc.k}</b>` }),
+    el('div', { html: `<span>轮廓系数</span><b>${fmt(sc.silhouette, 3)}</b>` }),
+    el('div', { html: `<span>惯性</span><b>${fmt(sc.inertia, 1)}</b>` }),
+    el('div', { html: `<span>运行耗时</span><b>${r.elapsed_s}s</b>` }),
+  ]));
+  const judge = sc.silhouette > 0.5 ? ['ok', '分型清晰'] : sc.silhouette > 0.3 ? ['warn', '分型可接受'] : ['bad', '分型弱，建议换 k 或增删变量'];
+  p.appendChild(el('div', { class: 'muted', html: `轮廓系数判定：<span class="pill ${judge[0]}">${judge[1]}</span> —— 轮廓系数衡量"组内紧、组间散"，>0.5 好，0.3~0.5 可接受。` }));
+
+  // 散点
+  const fg = r.figures.pca || r.figures.scatter, w = 720, h = 380, pad = 36;
+  const g = svg(w, h);
+  const xs = fg.points.map(d => d.x), ys = fg.points.map(d => d.y);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const X = v => pad + (v - x0) / (x1 - x0 || 1) * (w - pad * 2);
+  const Y = v => h - pad - (v - y0) / (y1 - y0 || 1) * (h - pad * 2);
+  g.appendChild(mk('rect', { x: pad, y: pad, width: w - pad * 2, height: h - pad * 2, fill: 'none', stroke: '#22313f' }));
+  fg.points.forEach(d => g.appendChild(mk('circle', {
+    cx: X(d.x), cy: Y(d.y), r: 3, fill: PAL[d.c % PAL.length], opacity: .72
+  })));
+  const lx = mk('text', { x: w / 2, y: h - 8, fill: '#8aa0b4', 'font-size': 11, 'text-anchor': 'middle' });
+  lx.textContent = fg.x_label; g.appendChild(lx);
+  p.appendChild(el('h3', { text: '情境分布（PCA 主成分平面）', style: 'margin-top:16px' }));
+  p.appendChild(g);
+  p.appendChild(el('div', { class: 'legend', html: sc.stats.map((s, i) =>
+    `<span><i style="background:${PAL[i % PAL.length]}"></i>${s.scenario}（n=${s.n}）</span>`).join('') }));
+  if (r.figures.pca) {
+    const pc = r.figures.pca;
+    p.appendChild(el('div', { class: 'muted', style: 'margin-top:6px', html:
+      `PC1 解释 <b>${(pc.explained[0] * 100).toFixed(1)}%</b> 方差，PC2 解释 <b>${(pc.explained[1] * 100).toFixed(1)}%</b>。` +
+      `载荷（PC1）：` + Object.entries(pc.loadings).map(([k, v]) => `${k} ${v[0]}`).join('、') }));
+  }
+
+  // 情境均值表
+  const cols = ['scenario', 'n', ...r.meta.factors, r.meta.target];
+  const tb = el('table');
+  tb.appendChild(el('thead', { html: '<tr>' + cols.map(c => `<th>${c}</th>`).join('') + '</tr>' }));
+  const body = el('tbody');
+  sc.stats.forEach(s => body.appendChild(el('tr', { html: cols.map(c => `<td>${fmt(s[c])}</td>`).join('') })));
+  tb.appendChild(body);
+  p.appendChild(el('h3', { text: '各情境的变量均值', style: 'margin-top:16px' }));
+  p.appendChild(tb);
+  p.appendChild(el('div', { class: 'muted', style: 'margin-top:8px',
+    text: '读法：比较同一列在不同情境间的差异，差异越大说明该变量越能区分情境；再看 y 列，找出"高绩效情境"的组合特征。' }));
+}
+
+/* ---------------- 渲染：规则 ---------------- */
+function renderRules() {
+  const p = $('#pane'), r = S.result, t = r.tree; p.innerHTML = '';
+  p.appendChild(el('div', { class: 'stat' }, [
+    el('div', { html: `<span>训练精度</span><b>${(t.accuracy * 100).toFixed(1)}%</b>` }),
+    el('div', { html: `<span>5 折交叉验证</span><b>${(t.cv.mean * 100).toFixed(1)}%</b>` }),
+    el('div', { html: `<span>叶节点 / 规则</span><b>${t.leaves}</b>` }),
+    el('div', { html: `<span>树深度</span><b>${t.depth}</b>` }),
+  ]));
+  p.appendChild(el('div', { class: 'muted', html:
+    `交叉验证标准差 ±${(t.cv.std * 100).toFixed(1)}%。精度只说明"规则能复现数据"，不说明因果。` }));
+
+  // 重要性
+  p.appendChild(el('h3', { text: '变量重要性（Gini 下降）', style: 'margin-top:16px' }));
+  const imp = t.importances;
+  Object.keys(imp).forEach(k => {
+    const v = imp[k];
+    const row = el('div', { style: 'margin:6px 0' });
+    row.appendChild(el('div', { class: 'row', html: `<span>${k}</span><b>${(v * 100).toFixed(1)}%</b>` }));
+    row.appendChild(el('div', { class: 'bar' }, [el('i', { style: `width:${Math.max(2, v * 100)}%` })]));
+    p.appendChild(row);
+  });
+
+  // 单因素相关 vs 组合
+  p.appendChild(el('h3', { text: '单因素相关（对照）', style: 'margin-top:18px' }));
+  const tb = el('table');
+  tb.appendChild(el('thead', { html: '<tr><th>变量</th><th>与 y 的 Pearson r</th><th>树中重要性</th></tr>' }));
+  const b = el('tbody');
+  Object.keys(t.single_factor_r).forEach(k => b.appendChild(el('tr', { html:
+    `<td>${k}</td><td>${fmt(t.single_factor_r[k], 3)}</td><td>${((imp[k] || 0) * 100).toFixed(1)}%</td>` })));
+  tb.appendChild(b); p.appendChild(tb);
+  p.appendChild(el('div', { class: 'muted', style: 'margin-top:6px',
+    text: '若某变量 r 很弱但重要性很高，说明它是以"组合条件"起作用的——这正是单因素分析会漏掉的部分。' }));
+
+  // 规则
+  p.appendChild(el('h3', { text: `条件组合规则（共 ${t.rules.length} 条）`, style: 'margin-top:18px' }));
+  t.rules.sort((a, b2) => b2.confidence * b2.support - a.confidence * a.support).forEach((ru, i) => {
+    p.appendChild(el('div', { class: 'rule', html:
+      `<b>R${i + 1}</b> IF ${ru.conditions.map(c => `<code>${c}</code>`).join(' 且 ') || '（无分裂）'}
+       → THEN <code>${r.meta.target} = ${ru.then}</code>
+       <div class="meta">支持度 n=${ru.support}（${(ru.support / r.meta.used_rows * 100).toFixed(1)}%） ·
+       置信度 ${(ru.confidence * 100).toFixed(1)}% · 分布 ${ru.distribution.join('/')}</div>` }));
+  });
+}
+
+/* ---------------- 渲染：网络 ---------------- */
+function renderNet() {
+  const p = $('#pane'), r = S.result, n = r.network; p.innerHTML = '';
+  if (!n.nodes.length) { p.innerHTML = '<div class="muted">没有满足阈值的边。</div>'; return; }
+  p.appendChild(el('div', { class: 'muted', html: `|r| ≥ ${n.threshold} 剪枝后保留 <b>${n.edges.length}</b> 条边。边的粗细表示关联强度。` }));
+
+  const w = 720, h = 430, cx = w / 2, cy = h / 2, R = 150;
+  const g = svg(w, h);
+  const pos = {};
+  n.nodes.forEach((nd, i) => {
+    const a = -Math.PI / 2 + i * 2 * Math.PI / n.nodes.length;
+    pos[nd.id] = [cx + R * Math.cos(a), cy + R * Math.sin(a)];
+  });
+  n.edges.forEach(e => {
+    const [x1, y1] = pos[e.source], [x2, y2] = pos[e.target];
+    g.appendChild(mk('line', {
+      x1, y1, x2, y2, stroke: e.weight > 0 ? '#4c9aff' : '#ef4444',
+      'stroke-width': Math.max(1, e.abs * 6), opacity: .5
+    }));
+  });
+  n.nodes.forEach(nd => {
+    const [x, y] = pos[nd.id];
+    const rr = 8 + Math.min(16, nd.strength * 4);
+    g.appendChild(mk('circle', { cx: x, cy: y, r: rr, fill: '#16222e', stroke: '#22d3ee', 'stroke-width': 1.6 }));
+    const tx = mk('text', { x, y: y - rr - 7, fill: '#dfe9f3', 'font-size': 11.5, 'text-anchor': 'middle' });
+    tx.textContent = nd.id; g.appendChild(tx);
+  });
+  p.appendChild(g);
+  p.appendChild(el('div', { class: 'legend', html: '<span><i style="background:#4c9aff"></i>正相关</span><span><i style="background:#ef4444"></i>负相关</span><span>节点大小 = 关联强度</span>' }));
+
+  const tb = el('table');
+  tb.appendChild(el('thead', { html: '<tr><th>节点</th><th>度</th><th>关联强度</th><th>特征向量中心性</th></tr>' }));
+  const b = el('tbody');
+  n.nodes.forEach(nd => b.appendChild(el('tr', { html:
+    `<td>${nd.id}</td><td>${nd.degree}</td><td>${fmt(nd.strength, 2)}</td><td>${fmt(nd.eigen, 3)}</td>` })));
+  tb.appendChild(b);
+  p.appendChild(el('h3', { text: '节点中心性', style: 'margin-top:16px' }));
+  p.appendChild(tb);
+  p.appendChild(el('div', { class: 'rule', style: 'margin-top:12px',
+    text: '注意：这里的边来自 Pearson 相关，代表"共同变动"，不是因果路径。要做因果推断，需要工具变量 / DID / 断点回归等识别策略。' }));
+}
+
+/* ---------------- 渲染：报告 ---------------- */
+function renderReport() {
+  const p = $('#pane'), r = S.result;
+  p.innerHTML = '';
+  const bar = el('div', { style: 'display:flex;gap:8px;margin-bottom:10px' });
+  const dl = el('button', { class: 'ghost', text: '下载 Markdown 报告' });
+  dl.onclick = () => {
+    const blob = new Blob([r.report_md], { type: 'text/markdown;charset=utf-8' });
+    const a = el('a', { href: URL.createObjectURL(blob), download: `DAC报告_${r.run_id}.md` });
+    document.body.appendChild(a); a.click(); a.remove();
+  };
+  const dj = el('button', { class: 'ghost', text: '下载结果 JSON' });
+  dj.onclick = () => {
+    const blob = new Blob([JSON.stringify(r, null, 2)], { type: 'application/json' });
+    const a = el('a', { href: URL.createObjectURL(blob), download: `DAC结果_${r.run_id}.json` });
+    document.body.appendChild(a); a.click(); a.remove();
+  };
+  bar.appendChild(dl); bar.appendChild(dj);
+  p.appendChild(bar);
+  p.appendChild(el('div', { class: 'muted', html:
+    `运行号 <b>${r.run_id}</b> · 数据指纹 <b>${r.snapshot.fingerprint}</b> · 种子 ${r.snapshot.params.seed} · 耗时 ${r.elapsed_s}s
+     <br>同一份数据 + 同一组参数 + 同一种子 = 同一份结果，可复算。` }));
+  p.appendChild(el('pre', { text: r.report_md, style: 'margin-top:12px' }));
+}
+
+/* 自动模式：?auto=1&tab=net —— 用于分享链接直达与截图验收 */
+(async () => {
+  const q = new URLSearchParams(location.search);
+  if (!q.has('auto')) return;
+  try {
+    await loadSample();
+    await new Promise(r => setTimeout(r, 250));
+    $('#btnRun').click();
+    const want = q.get('tab');
+    if (want) {
+      const h = setInterval(() => { if (S.result) { clearInterval(h); setTab(want); } }, 150);
+    }
+  } catch (e) { toast('自动模式失败：' + e.message); }
+})();
+
+/* 数字键快捷运行 */
+document.addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') $('#btnRun').click();
+});
+</script>
+</body>
+</html>
+
