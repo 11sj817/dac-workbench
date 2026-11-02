@@ -100,7 +100,15 @@ svg{max-width:100%;height:auto;display:block}
 .stat div:hover{border-color:#2c4258}
 .stat span{display:block;color:var(--dim);font-size:11px}
 .stat b{font-size:16px;font-variant-numeric:tabular-nums}
-.toast{position:fixed;right:20px;bottom:20px;background:#1b2a38;border:1px solid var(--line);
+.statusbar{position:fixed;left:0;right:0;bottom:0;height:34px;display:flex;align-items:center;gap:10px;
+  padding:0 16px;background:#0c141d;border-top:1px solid var(--line);font-size:12px;color:var(--dim);z-index:40}
+.statusbar .sb-dot{width:7px;height:7px;border-radius:50%;background:#34d399}
+.statusbar.on .sb-dot{background:#4c9aff;animation:pulse 1s infinite}
+@keyframes pulse{50%{opacity:.35}}
+.statusbar b{color:var(--txt);font-weight:500}
+.statusbar .mini{padding:3px 9px;font-size:11.5px}
+body{padding-bottom:38px}
+.toast{position:fixed;right:20px;bottom:48px;background:#1b2a38;border:1px solid var(--line);
   border-radius:10px;padding:10px 14px;font-size:12.5px;opacity:0;transform:translateY(8px);
   transition:.25s;z-index:99;max-width:420px;line-height:1.6}
 .toast.on{opacity:1;transform:none}
@@ -175,6 +183,7 @@ svg{max-width:100%;height:auto;display:block}
       <label class="row" style="margin-top:12px">条件变量 x <span id="facCount"></span></label>
       <div id="factors" style="max-height:170px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:8px"></div>
       <div class="hint">只列出纯数值列。文本列会提示但不参与计算。</div>
+      <button class="ghost" id="btnRoles" style="width:100%;margin-top:8px">变量角色与工作表设置</button>
       <button id="next2" style="width:100%;margin-top:10px">下一步：校准</button>
     </div>
 
@@ -223,6 +232,7 @@ svg{max-width:100%;height:auto;display:block}
       <div class="tabs" id="tabs">
         <button data-tab="guide" class="on">操作指引</button>
         <button data-tab="profile">数据体检</button>
+        <button data-tab="quality">数据质量</button>
         <button data-tab="corr">相关性</button>
         <button data-tab="calib">云模型校准</button>
         <button data-tab="scene">异质性分型</button>
@@ -239,6 +249,13 @@ svg{max-width:100%;height:auto;display:block}
   </div>
 </div>
 
+:<div class="statusbar" id="statusbar">
+  <span class="sb-dot"></span>
+  <span class="sb-text">就绪</span>
+  <div class="grow"></div>
+  <span class="sb-hint">Worker: <b id="sb-worker">检测中</b></span>
+  <button class="ghost mini" id="sb-cancel" style="display:none">取消计算</button>
+</div>
 <div class="toast" id="toast"></div>
 <div class="tip" id="tip"></div>
 
