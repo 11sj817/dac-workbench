@@ -22,6 +22,27 @@
 
 参考：李海林、林春培《复杂系统影响因素研究的数据驱动分析方法》，清华大学出版社，ISBN 9787302685456。
 
+## V2.0 更新（2026-11-02）
+
+从「功能演示」升级为「可验证的分析工具」：
+
+- 交叉验证改为**分层 K 折**，输出混淆矩阵 / 平衡准确率 / Macro-F1 / 每类 P-R-F1
+- **修复 BIC 参数数量计算错误**（原用实际出现配置数，应为理论 `k^|Pa|×(k-1)`）
+- 贝叶斯网络搜索增加 **Reverse** 操作 + 搜索日志
+- 推断增加**联合空间上限**（防卡死）与**不可能证据**显式处理
+- KMeans **空簇救援**
+- **33 项自动化测试，100% 通过**
+
+详见：[ALGORITHM_AUDIT.md](ALGORITHM_AUDIT.md) · [ALGORITHM_CHANGELOG.md](ALGORITHM_CHANGELOG.md) · [TEST_REPORT.md](TEST_REPORT.md) · [REPRODUCIBILITY.md](REPRODUCIBILITY.md) · [V2_FEATURES.md](V2_FEATURES.md)
+
+运行测试：
+
+```bash
+node tests/test_core.js
+```
+
+---
+
 ## 功能清单
 
 - 数据：拖拽上传 xlsx / csv；内置 3 份公开数据（红酒质量、学生成绩、企业绩效）
@@ -58,6 +79,7 @@ python build_workbench.py        # 合并 workbench/* + data/samples.js → DAC-
 ## 目录
 
 ```
+tests/test_core.js     33 项算法自动化测试
 workbench/core.js      算法内核（CSV/XLSX 解析、云模型、KMeans、CART、PCA、贝叶斯网络）
 workbench/ui.js        交互层（步骤流、11 个结果 Tab、AI 助手）
 workbench/index.html   结构与样式

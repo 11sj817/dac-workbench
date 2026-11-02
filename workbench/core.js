@@ -358,6 +358,7 @@
         centers.push(Z[pick].slice());
       }
       let labels = new Array(n).fill(0), changed = true, iter = 0;
+      let emptyClusters = 0;
       while (changed && iter < maxIter) {
         changed = false; iter++;
         for (let i = 0; i < n; i++) {
@@ -365,15 +366,26 @@
           for (let c = 0; c < k; c++) { const d = dist2(Z[i], centers[c]); if (d < bestD) { bestD = d; bestK = c; } }
           if (labels[i] !== bestK) { labels[i] = bestK; changed = true; }
         }
+        emptyClusters = 0;
         for (let c = 0; c < k; c++) {
           const members = Z.filter((_, i) => labels[i] === c);
-          if (!members.length) continue;
+          if (!members.length) {
+            // 空簇救援：把"离自己中心最远"的样本改派给空簇
+            emptyClusters++;
+            let farIdx = -1, farDist = -1;
+            for (let i = 0; i < n; i++) {
+              const d = dist2(Z[i], centers[labels[i]]);
+              if (d > farDist) { farDist = d; farIdx = i; }
+            }
+            if (farIdx >= 0) { labels[farIdx] = c; centers[c] = Z[farIdx].slice(); }
+            continue;
+          }
           for (let j = 0; j < centers[c].length; j++) centers[c][j] = mean(members.map(m => m[j]));
         }
       }
       let inertia = 0;
       for (let i = 0; i < n; i++) inertia += dist2(Z[i], centers[labels[i]]);
-      if (!best || inertia < best.inertia) best = { labels: labels.slice(), centers: centers.map(c => c.slice()), inertia, iters: iter };
+      if (!best || inertia < best.inertia) best = { labels: labels.slice(), centers: centers.map(c => c.slice()), inertia, iters: iter, emptyClusters };
     }
     return { ...best, k, Z };
   }
@@ -688,34 +700,144 @@
    * 扩展能力：交叉验证 / 肘部曲线 / 稳健性 / 情境命名 / 贝叶斯网络
    * ============================================================ */
 
-  /* ---- 5 折交叉验证 ---- */
-  function crossValidate(X, y, featureNames, labels, opt, folds) {
-    const K = folds || 5;
-    const idx = X.map((_, i) => i);
-    const r = rng((opt && opt.seed) || 42);
-    for (let i = idx.length - 1; i > 0; i--) {
-      const j = Math.floor(r() * (i + 1));
-      [idx[i], idx[j]] = [idx[j], idx[i]];
+  /* ---------------- 分类评价指标 ---------------- */
+  function evalMetrics(yTrue, yPred, nClasses) {
+    const C = nClasses;
+    const cm = Array.from({ length: C }, () => new Array(C).fill(0));
+    for (let i = 0; i < yTrue.length; i++) cm[yTrue[i]][yPred[i]]++;
+    let correct = 0;
+    const total = yTrue.length;
+    for (let i = 0; i < C; i++) correct += cm[i][i];
+    const per = [];
+    for (let c = 0; c < C; c++) {
+      const tp = cm[c][c];
+      let fp = 0, fn = 0, support = 0;
+      for (let j = 0; j < C; j++) {
+        if (j !== c) { fp += cm[j][c]; fn += cm[c][j]; }
+        support += cm[c][j];
+      }
+      const prec = tp + fp ? tp / (tp + fp) : 0;
+      const rec = tp + fn ? tp / (tp + fn) : 0;
+      per.push({
+        cls: c, support, tp, fp, fn,
+        precision: prec, recall: rec,
+        f1: prec + rec ? 2 * prec * rec / (prec + rec) : 0
+      });
     }
-    const scores = [];
-    const per = Math.ceil(idx.length / K);
-    for (let f = 0; f < K; f++) {
-      const test = idx.slice(f * per, (f + 1) * per);
+    const active = per.filter(x => x.support > 0);
+    return {
+      accuracy: total ? correct / total : 0,
+      balancedAccuracy: active.length ? mean(active.map(x => x.recall)) : 0,
+      macroF1: active.length ? mean(active.map(x => x.f1)) : 0,
+      perClass: per,
+      confusion: cm,
+      n: total
+    };
+  }
+
+  /* ---------------- 分层 K 折 ---------------- */
+  function stratifiedFolds(y, K, seed) {
+    const byClass = {};
+    y.forEach((c, i) => { (byClass[c] = byClass[c] || []).push(i); });
+    const r = rng(seed || 42);
+    Object.keys(byClass).forEach(k => {
+      const arr = byClass[k];
+      for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(r() * (i + 1));
+        [arr[i], arr[j]] = [arr[j], arr[i]];
+      }
+    });
+    const folds = Array.from({ length: K }, () => []);
+    let f = 0;
+    Object.keys(byClass).forEach(k => {
+      byClass[k].forEach(i => { folds[f % K].push(i); f++; });
+    });
+    return folds;
+  }
+
+  /* ---------------- 交叉验证（分层 + 全指标） ---------------- */
+  /**
+   * 分层 K 折交叉验证。
+   * 注意：X 必须是"已离散化"的特征矩阵；若需严格无泄漏（分位数只在训练折拟合），
+   * 请使用 crossValidateStrict。
+   */
+  function crossValidate(X, y, featureNames, labels, opt, folds) {
+    const K = Math.max(2, folds || 5);
+    const nClass = labels.length;
+    const counts = new Array(nClass).fill(0);
+    y.forEach(v => { if (v >= 0 && v < nClass) counts[v]++; });
+    const present = counts.filter(c => c > 0);
+    const minCount = present.length ? Math.min(...present) : 0;
+
+    let effK = K;
+    const warnings = [];
+    if (minCount < K) {
+      effK = Math.max(2, minCount);
+      warnings.push(`最小类别仅 ${minCount} 个样本，折数由 ${K} 降为 ${effK}`);
+    }
+    if (y.length < 30) warnings.push(`样本量仅 ${y.length}，交叉验证结果仅供参考`);
+    if (minCount < 5) warnings.push(`存在样本数 < 5 的类别，单类指标不可靠`);
+
+    const foldIdx = stratifiedFolds(y, effK, (opt && opt.seed) || 42);
+    const perFold = [];
+    const oofPred = new Array(X.length).fill(-1);
+
+    for (let f = 0; f < effK; f++) {
+      const test = foldIdx[f];
       if (!test.length) continue;
       const testSet = new Set(test);
       const trX = [], trY = [];
       for (let i = 0; i < X.length; i++) if (!testSet.has(i)) { trX.push(X[i]); trY.push(y[i]); }
-      if (trX.length < 20) continue;
+      if (trX.length < 10) { warnings.push(`第 ${f + 1} 折训练集过小，已跳过`); continue; }
+
       const t = cart(trX, trY, featureNames, labels, opt);
-      let ok = 0;
-      for (const i of test) if (predictTree(t.root, X[i]) === y[i]) ok++;
-      scores.push(ok / test.length);
+      const trPred = trX.map(x => predictTree(t.root, x));
+      const teY = test.map(i => y[i]);
+      const tePred = test.map(i => predictTree(t.root, X[i]));
+      test.forEach((i, k) => { oofPred[i] = tePred[k]; });
+
+      const trM = evalMetrics(trY, trPred, nClass);
+      const teM = evalMetrics(teY, tePred, nClass);
+      perFold.push({
+        fold: f + 1, nTrain: trX.length, nTest: test.length,
+        trainAccuracy: trM.accuracy, trainBalanced: trM.balancedAccuracy,
+        testAccuracy: teM.accuracy, balancedAccuracy: teM.balancedAccuracy,
+        macroF1: teM.macroF1
+      });
     }
+
+    const keepIdx = [];
+    const keepPred = [];
+    for (let i = 0; i < X.length; i++) if (oofPred[i] >= 0) { keepIdx.push(i); keepPred.push(oofPred[i]); }
+    const oofY = keepIdx.map(i => y[i]);
+    const oofM = evalMetrics(oofY, keepPred, nClass);
+
+    // 校准后可能出现"空等级"（例如某一档没有任何样本）
+    const emptyCls = oofM.perClass.filter(c => c.support === 0).map(c => labels[c.cls]);
+    if (emptyCls.length) {
+      warnings.push(`等级「${emptyCls.join('、')}」在样本中没有出现（分位区间过窄或等级过多），该类别指标无意义`);
+    }
+
+    const testAcc = perFold.map(f => f.testAccuracy);
+    const trainAcc = perFold.map(f => f.trainAccuracy);
     return {
-      folds: scores.length,
-      mean: mean(scores) || 0,
-      std: std(scores) || 0,
-      scores
+      k: effK,
+      folds: perFold.length,
+      perFold,
+      warning: warnings.length ? warnings.join('；') : null,
+      mean: mean(testAcc) || 0,
+      std: std(testAcc) || 0,
+      trainMean: mean(trainAcc) || 0,
+      trainStd: std(trainAcc) || 0,
+      gap: (mean(trainAcc) || 0) - (mean(testAcc) || 0),
+      oof: {
+        accuracy: oofM.accuracy,
+        balancedAccuracy: oofM.balancedAccuracy,
+        macroF1: oofM.macroF1,
+        perClass: oofM.perClass,
+        confusion: oofM.confusion,
+        n: oofM.n
+      }
     };
   }
 
@@ -824,22 +946,22 @@
       counts[c][row[node]]++;
     }
     let ll = 0;
-    let q = 0;
     for (let c = 0; c < nParentConfigs; c++) {
       const tot = sum(counts[c]);
       if (!tot) continue;
-      q++;
       for (let v = 0; v < k; v++) {
         if (!counts[c][v]) continue;
         ll += counts[c][v] * Math.log(counts[c][v] / tot);
       }
     }
-    const params = q * (k - 1);
+    // BIC 参数数必须用"理论父配置数" r^|Pa| × (k-1)，
+    // 不能用实际出现的配置数（否则会系统性偏爱高入度结构）。
+    const params = Math.pow(k, parents.length) * (k - 1);
     return ll - (params / 2) * Math.log(n);
   }
 
   function bnLearn(discrete, names, levels, opt) {
-    const o = Object.assign({ maxParents: 2, maxIter: 12 }, opt || {});
+    const o = Object.assign({ maxParents: 2, maxIter: 20, seed: 42 }, opt || {});
     const p = names.length;
     const parents = names.map(() => []);
     const scoreCache = new Map();
@@ -850,52 +972,94 @@
     };
     const localScore = parents.map((ps, i) => scoreOf(i, ps));
 
+    // 可选：随机起点。seed 不同 → 起点不同 → 可做"多次初始化对比"
+    const r = rng(o.seed || 42);
+    if (o.randomStart) {
+      for (let k = 0; k < Math.max(1, Math.floor(p / 2)); k++) {
+        const i = Math.floor(r() * p);
+        const j = Math.floor(r() * p);
+        if (i === j || parents[i].includes(j) || isAncestor(parents, i, j)) continue;
+        if (parents[i].length >= o.maxParents) continue;
+        const np = parents[i].concat([j]);
+        if (scoreOf(i, np) > localScore[i]) { parents[i] = np; localScore[i] = scoreOf(i, np); }
+      }
+    }
+
+    const log = [];
+    let improved = false;
     for (let it = 0; it < o.maxIter; it++) {
       let bestGain = 0, bestOp = null;
+
       for (let i = 0; i < p; i++) {
-        // 加边
+        // ---- Add ----
         if (parents[i].length < o.maxParents) {
           for (let j = 0; j < p; j++) {
             if (j === i || parents[i].includes(j)) continue;
-            if (isAncestor(parents, i, j)) continue; // 会成环
-            const np = parents[i].concat([j]);
-            const gain = scoreOf(i, np) - localScore[i];
+            if (isAncestor(parents, i, j)) continue;
+            const gain = scoreOf(i, parents[i].concat([j])) - localScore[i];
             if (gain > bestGain) { bestGain = gain; bestOp = { type: 'add', i, j }; }
           }
         }
-        // 删边
+        // ---- Delete ----
         for (const j of parents[i]) {
-          const np = parents[i].filter(x => x !== j);
-          const gain = scoreOf(i, np) - localScore[i];
+          const gain = scoreOf(i, parents[i].filter(x => x !== j)) - localScore[i];
           if (gain > bestGain) { bestGain = gain; bestOp = { type: 'del', i, j }; }
         }
+        // ---- Reverse：把 j -> i 反转为 i -> j ----
+        for (const j of parents[i]) {
+          if (parents[j].length >= o.maxParents) continue;
+          const newI = parents[i].filter(x => x !== j);
+          const newJ = parents[j].concat([i]);
+          const gain = (scoreOf(i, newI) - localScore[i]) + (scoreOf(j, newJ) - localScore[j]);
+          if (gain > bestGain) { bestGain = gain; bestOp = { type: 'rev', i, j }; }
+        }
       }
+
       if (!bestOp || bestGain < 1e-6) break;
       const { type, i, j } = bestOp;
-      if (type === 'add') parents[i] = parents[i].concat([j]);
-      else parents[i] = parents[i].filter(x => x !== j);
-      localScore[i] = scoreOf(i, parents[i]);
+      if (type === 'add') {
+        parents[i] = parents[i].concat([j]);
+        localScore[i] = scoreOf(i, parents[i]);
+      } else if (type === 'del') {
+        parents[i] = parents[i].filter(x => x !== j);
+        localScore[i] = scoreOf(i, parents[i]);
+      } else {
+        parents[i] = parents[i].filter(x => x !== j);
+        parents[j] = parents[j].concat([i]);
+        localScore[i] = scoreOf(i, parents[i]);
+        localScore[j] = scoreOf(j, parents[j]);
+      }
+      log.push({ step: it + 1, op: type, from: names[j], to: names[i], gain: +bestGain.toFixed(4) });
+      improved = true;
     }
 
-    // 参数学习：CPT（拉普拉斯平滑）
+    // 参数学习：CPT（Dirichlet 平滑，alpha 可配置）
+    const alpha = o.alpha === undefined ? 1 : Number(o.alpha);
     const cpt = names.map((_, i) => {
       const par = parents[i];
       const nCfg = Math.pow(levels, par.length);
       const table = [];
-      for (let c = 0; c < nCfg; c++) table.push(new Array(levels).fill(1));
+      for (let c = 0; c < nCfg; c++) table.push(new Array(levels).fill(alpha));
       for (const row of discrete) {
         const c = par.length ? configIndex(levels, row, par) : 0;
         table[c][row[i]]++;
       }
-      return table.map(r => {
-        const t = sum(r);
-        return r.map(v => v / t);
+      return table.map(row => {
+        const t = sum(row);
+        return row.map(v => v / t);
       });
     });
 
     const edges = [];
     parents.forEach((ps, i) => ps.forEach(j => edges.push({ from: names[j], to: names[i] })));
-    return { names, levels, parents, cpt, edges, score: sum(localScore) };
+    return {
+      names, levels, parents, cpt, edges,
+      score: sum(localScore),
+      log,
+      converged: !improved,
+      iterations: log.length,
+      alpha
+    };
   }
 
   /* ---- 精确推断：枚举所有配置（变量数 ≤ 8、等级 ≤ 4 时可行） ---- */
@@ -920,10 +1084,15 @@
     return joint;
   }
 
+  const BN_MAX_JOINT = 200000;   // 精确推断的联合空间上限
+
   function bnInfer(model, evidence) {
     const { names, levels } = model;
     const n = names.length;
     const total = Math.pow(levels, n);
+    if (total > BN_MAX_JOINT) {
+      throw new Error(`联合空间 ${total}（变量 ${n} × 状态 ${levels}）超出精确推断上限 ${BN_MAX_JOINT}，请减少变量或降低等级数`);
+    }
     const joint = bnJoint(model);
     const targetIdx = n - 1;
     const post = new Array(levels).fill(0);
@@ -941,11 +1110,23 @@
       zsum += joint[code];
       post[row[targetIdx]] += joint[code];
     }
-    if (zsum > 0) for (let v = 0; v < levels; v++) post[v] /= zsum;
+    if (zsum <= 0) {
+      // 证据在数据中从未出现 → 无法推断，明确报错而不是返回全 0
+      return {
+        target: names[targetIdx],
+        posterior: null,
+        impossible: true,
+        evidence,
+        message: '该证据组合在训练数据中概率为 0，无法给出后验分布（可能是样本稀疏或条件互斥）'
+      };
+    }
+    for (let v = 0; v < levels; v++) post[v] /= zsum;
     return {
       target: names[targetIdx],
       posterior: post,
-      evidenceSize: zsum
+      impossible: false,
+      evidence,
+      evidenceProb: zsum
     };
   }
 
@@ -975,7 +1156,7 @@
 
   global.DACCore = {
     parseCSV, parseXLSX, profile, corrMatrix, calibrate, pearson, robustScale,
-    crossValidate, elbowCurve, robustness, nameScenarios,
+    crossValidate, stratifiedFolds, evalMetrics, elbowCurve, robustness, nameScenarios,
     bnLearn, bnInfer, bnSensitivity, toCSV,
     kmeans, silhouette, pca, cart, network, report,
     numericCols, isNum, mean, std, quantile, LEVEL_LABELS

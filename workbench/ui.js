@@ -870,14 +870,73 @@
   function renderRobust() {
     const pane = $('#pane'), r = S.res;
     pane.innerHTML = '';
+    const cv = r.tree.cv;
+    const L = r.calibration.labels;
     pane.appendChild(el('div', { class: 'stat' }, [
-      el('div', { html: `<span>交叉验证</span><b>${r.tree.cv ? pct(r.tree.cv.mean) : '-'}</b>` }),
-      el('div', { html: `<span>CV 标准差</span><b>±${r.tree.cv ? pct(r.tree.cv.std) : '-'}</b>` }),
-      el('div', { html: `<span>训练精度</span><b>${pct(r.tree.accuracy)}</b>` }),
-      el('div', { html: `<span>折数</span><b>${r.tree.cv ? r.tree.cv.folds : '-'}</b>` })
+      el('div', { html: `<span>测试集准确率（CV 均值）</span><b>${cv ? pct(cv.mean) : '-'}</b>` }),
+      el('div', { html: `<span>平衡准确率</span><b>${cv && cv.oof ? pct(cv.oof.balancedAccuracy) : '-'}</b>` }),
+      el('div', { html: `<span>Macro-F1</span><b>${cv && cv.oof ? pct(cv.oof.macroF1) : '-'}</b>` }),
+      el('div', { html: `<span>训练-测试差距</span><b>${cv && cv.gap !== undefined ? (cv.gap * 100).toFixed(1) + ' pp' : '-'}</b>` })
     ]));
     pane.appendChild(el('div', { class: 'muted', html:
-      '训练精度只说明“能拟合”，交叉验证才说明“能泛化”。两者差距过大 = 过拟合。' }));
+      `训练 ${cv ? pct(cv.trainMean) : '-'} vs 测试 ${cv ? pct(cv.mean) : '-'} —— 差距大说明过拟合；` +
+      `平衡准确率与 Accuracy 差距大说明类别不平衡下 Accuracy 有欺骗性。` }));
+
+    if (cv && cv.warning) {
+      pane.appendChild(el('div', { class: 'hint', style: 'border-color:#5a4a1a;color:#f5c66b',
+        html: '<b>样本量警告</b>：' + cv.warning }));
+    }
+
+    // 混淆矩阵
+    if (cv && cv.oof && cv.oof.confusion) {
+      const cm = cv.oof.confusion;
+      const tb0 = el('table');
+      tb0.appendChild(el('thead', { html: '<tr><th>真实 \\ 预测</th>' + L.map(l => `<th>${l}</th>`).join('') + '<th>合计</th></tr>' }));
+      const b0 = el('tbody');
+      cm.forEach((row, i) => {
+        const tot = row.reduce((a, b2) => a + b2, 0);
+        const isDiag = (j) => j === i;
+        b0.appendChild(el('tr', { html:
+          `<td>${L[i]}</td>` +
+          row.map((v, j) => `<td style="color:${isDiag(j) ? '#34d399' : (v > 0 ? '#fca5a5' : '#5d7387')};font-weight:${isDiag(j) ? 600 : 400}">${v}</td>`).join('') +
+          `<td>${tot}</td>` }));
+      });
+      tb0.appendChild(b0);
+      pane.appendChild(el('h3', { text: `混淆矩阵（合并各折测试集，n=${cv.oof.n}）`, style: 'margin-top:16px' }));
+      pane.appendChild(tb0);
+      pane.appendChild(el('div', { class: 'muted', style: 'margin-top:6px',
+        text: '对角线是预测正确的样本；非对角线上数量越大，说明越容易混淆。' }));
+    }
+
+    // 每类指标
+    if (cv && cv.oof && cv.oof.perClass) {
+      const tb1 = el('table');
+      tb1.appendChild(el('thead', { html: '<tr><th>类别</th><th>支持度</th><th>Precision</th><th>Recall</th><th>F1</th></tr>' }));
+      const b1 = el('tbody');
+      cv.oof.perClass.forEach(c => b1.appendChild(el('tr', { html:
+        `<td>${L[c.cls]}</td><td>${c.support}</td>
+         <td>${pct(c.precision)}</td><td>${pct(c.recall)}</td><td>${pct(c.f1)}</td>` })));
+      tb1.appendChild(b1);
+      pane.appendChild(el('h3', { text: '各类别独立评价', style: 'margin-top:16px' }));
+      pane.appendChild(tb1);
+    }
+
+    // 每折
+    if (cv && cv.perFold && cv.perFold.length) {
+      const tb2 = el('table');
+      tb2.appendChild(el('thead', { html:
+        '<tr><th>折</th><th>训练 n</th><th>测试 n</th><th>训练准确率</th><th>测试准确率</th><th>平衡准确率</th><th>Macro-F1</th></tr>' }));
+      const b2 = el('tbody');
+      cv.perFold.forEach(f => b2.appendChild(el('tr', { html:
+        `<td>${f.fold}</td><td>${f.nTrain}</td><td>${f.nTest}</td>
+         <td>${pct(f.trainAccuracy)}</td><td>${pct(f.testAccuracy)}</td>
+         <td>${pct(f.balancedAccuracy)}</td><td>${pct(f.macroF1)}</td>` })));
+      tb2.appendChild(b2);
+      pane.appendChild(el('h3', { text: '各折明细（分层 K 折）', style: 'margin-top:16px' }));
+      pane.appendChild(tb2);
+      pane.appendChild(el('div', { class: 'muted', style: 'margin-top:6px',
+        text: `分层保证每折的类别比例与总体一致；折数 ${cv.k}，标准差 ±${(cv.std * 100).toFixed(1)} pp。` }));
+    }
 
     if (!S.extra.robust) {
       pane.appendChild(el('div', { class: 'muted', style: 'margin-top:16px', html: '正在跑 7 组参数变体…' }));
