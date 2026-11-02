@@ -3,7 +3,9 @@
 > 基于 DAC（数据驱动分析方法）思想的可交互数据分析工作台。
 > 纯前端单文件，零依赖、零后端，所有计算在浏览器本地完成。
 
-在线体验：部署到 GitHub Pages 后访问 `https://<你的用户名>.github.io/dac-workbench/`
+**在线体验：https://11sj817.github.io/dac-workbench/**
+
+仓库：https://github.com/11sj817/dac-workbench
 
 ---
 
@@ -78,3 +80,4 @@ DAC研究报告.html        DAC 原站的深度逆向研究报告
 ---
 
 **注意**：网络边与贝叶斯网络的方向代表条件依赖，**不是因果证明**。要论证因果需借助工具变量、DID、断点回归等识别策略。
+
