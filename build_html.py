@@ -13,7 +13,7 @@ import html
 import re
 from pathlib import Path
 
-ROOT = Path(r"D:\reverse\dac-reverse-research")
+ROOT = Path(__file__).resolve().parent
 OUT = ROOT / "DAC研究报告.html"
 
 SECTIONS = [

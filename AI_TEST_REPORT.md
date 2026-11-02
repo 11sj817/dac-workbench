@@ -2,7 +2,7 @@
 
 - 时间：2026-11-02 18:18:29
 - 服务：https://api.deepseek.com/v1 · 模型 deepseek-chat
-- Key：`sk-9…b80c`（长度 35）
+- Key：`sk-****`（已设置）
 - 数据：红酒质量（UCI Wine Quality，抽样 400）（400 条有效样本）
 
 ## 1. 生成分析方案

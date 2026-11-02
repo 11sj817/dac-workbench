@@ -52,7 +52,7 @@
 ### 方式 B：命令行
 
 ```bash
-cd D:\reverse\dac-reverse-research
+cd <项目根目录>
 node tests/test_core.js          # 33 项算法测试
 ```
 

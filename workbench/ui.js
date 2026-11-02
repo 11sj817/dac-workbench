@@ -2053,9 +2053,9 @@
     } catch (e) { /* 隐私模式下可能失败 */ }
   }
   function maskKey(k) {
+    // 故意不回显任何明文字符：截图/录屏/共享屏幕都不会泄漏 Key 片段
     if (!k) return '（未设置）';
-    if (k.length <= 10) return '****';
-    return k.slice(0, 4) + '…' + k.slice(-4) + `（长度 ${k.length}）`;
+    return `已设置 · ${k.length} 位 · ****`;
   }
 
   async function callLLM(messages) {

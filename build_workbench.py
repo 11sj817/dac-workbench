@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-ROOT = Path(r"D:\reverse\dac-reverse-research")
+ROOT = Path(__file__).resolve().parent
 WB = ROOT / "workbench"
 OUT = ROOT / "DAC-Workbench.html"
 

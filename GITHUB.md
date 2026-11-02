@@ -19,12 +19,12 @@
 
 | 仓库 | 原地址 | 备份位置 | 大小 |
 |---|---|---|---|
-| yunqingyan.xyz | github.com/11sj817/yunqingyan.xyz | `D:\reverse\github-backup\yunqingyan.xyz.git` | 1,085 KB |
+| yunqingyan.xyz | github.com/11sj817/yunqingyan.xyz | `<本地备份目录>/yunqingyan.xyz.git` | 1,085 KB |
 | miniature-octo-fiesta | github.com/11sj817/miniature-octo-fiesta | 空仓库，无需备份 | 0 |
 
 > 备份为 **bare mirror**，含全部分支与提交历史。恢复方法：
 > ```bash
-> git clone D:\reverse\github-backup\yunqingyan.xyz.git yunqingyan-restore
+> git clone <本地备份目录>/yunqingyan.xyz.git yunqingyan-restore
 > cd yunqingyan-restore
 > git remote set-url origin https://github.com/11sj817/yunqingyan.xyz.git
 > git push --mirror
