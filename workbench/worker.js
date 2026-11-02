@@ -68,9 +68,9 @@ const TASKS = {
   /* 严格无泄漏交叉验证 */
   strictCV(payload, onProgress) {
     const C = self.DACCore;
-    const { rawX, yRaw, names, labels, opts } = payload;
+    const { rawX, yRaw, names, labels, opts, groups } = payload;
     onProgress(10);
-    const res = C.crossValidateStrict(rawX, yRaw, names, labels, opts);
+    const res = C.crossValidateStrict(rawX, yRaw, names, labels, opts, groups || null);
     onProgress(100);
     // records 里的 imputeModel 含完整训练引用，去掉再回传
     if (res.records) {
