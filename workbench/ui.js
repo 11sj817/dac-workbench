@@ -696,6 +696,7 @@
       case 'bn': return renderBN();
       case 'robust': return renderRobust();
       case 'boot': return renderBootstrap();
+      case 'glm': return renderGLM();
       case 'ai': return renderAI();
       case 'report': return renderReport();
     }
@@ -1665,6 +1666,329 @@
   }
 
 
+
+
+  /* ---------------- 统计建模（GLM） ---------------- */
+  function glmState() {
+    if (!S.extra.glm) {
+      S.extra.glm = { family: 'gaussian', response: '', xvars: [], reference: {}, fit: null, error: null, roc: null, cm: null };
+    }
+    return S.extra.glm;
+  }
+
+  function renderGLM() {
+    const pane = $('#pane');
+    const G = window.DACGLM;
+    pane.innerHTML = '';
+    if (!G) { pane.innerHTML = '<div class="muted">GLM 模块未加载。</div>'; return; }
+    if (!S.rows.length) { pane.innerHTML = '<div class="muted">先导入数据。</div>'; return; }
+    const q = glmState();
+
+    pane.appendChild(el('div', { class: 'muted', html:
+      '这里做的是 <b>统计推断</b>：参数估计、标准误、显著性、OR/IRR。' +
+      '和 DAC 的探索性分析不同，GLM 会给出<b>总体参数</b>的推断区间。' }));
+
+    /* 目标变量类型提示 */
+    const types = {};
+    S.columns.forEach((c, j) => {
+      types[c] = C.detectTargetType(S.rows.map(r => r[j]));
+    });
+
+    /* 选择 */
+    const grid = el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap;margin:12px 0' });
+    const cell = (label, node, w) => el('div', { style: 'width:' + (w || 200) + 'px' },
+      [el('div', { class: 'muted', text: label }), node]);
+
+    const selResp = el('select', {});
+    selResp.appendChild(el('option', { value: '', text: '— 选择目标变量 —' }));
+    S.numeric.forEach(c => {
+      const t = types[c];
+      const o = el('option', { value: c, text: `${c}（${t.type}）` });
+      if (q.response === c) o.selected = true;
+      selResp.appendChild(o);
+    });
+    selResp.onchange = () => {
+      q.response = selResp.value;
+      q.fit = null; q.error = null; q.roc = null; q.cm = null;
+      // 自动推荐分布
+      const t = types[q.response];
+      if (t) {
+        if (t.type === 'binary') q.family = 'binomial';
+        else if (t.type === 'count') q.family = 'poisson';
+        else q.family = 'gaussian';
+      }
+      renderGLM();
+    };
+
+    const selFam = el('select', {});
+    [['gaussian', 'Gaussian（正态 · identity）'], ['binomial', 'Binomial（二项 · logit）'], ['poisson', 'Poisson（泊松 · log）']]
+      .forEach(([v, l]) => { const o = el('option', { value: v, text: l }); if (q.family === v) o.selected = true; selFam.appendChild(o); });
+    selFam.onchange = () => { q.family = selFam.value; q.fit = null; renderGLM(); };
+
+    grid.appendChild(cell('目标变量', selResp, 240));
+    grid.appendChild(cell('分布 / 链接', selFam, 260));
+    pane.appendChild(grid);
+
+    if (q.response && types[q.response]) {
+      const t = types[q.response];
+      pane.appendChild(el('div', { class: 'hint', html:
+        `<b>识别依据</b>：${esc(t.reason)}` +
+        (q.family === 'binomial' && t.type !== 'binary' ? '<br><span style="color:#f59e0b">⚠ 当前目标不是二分类，Binomial 会拒绝拟合</span>' : '') +
+        (q.family === 'poisson' && t.type !== 'count' ? '<br><span style="color:#f59e0b">⚠ 当前目标不像计数变量，Poisson 要求非负整数</span>' : '') }));
+    }
+
+    /* 自变量 */
+    pane.appendChild(el('h3', { text: '自变量', style: 'margin-top:14px' }));
+    const box = el('div', { style: 'border:1px solid var(--line);border-radius:8px;padding:8px;max-height:200px;overflow:auto' });
+    S.numeric.filter(c => c !== q.response).forEach(c => {
+      const t = types[c];
+      const isCat = (t.type === 'categorical' || t.type === 'binary');
+      const row = el('label', { class: 'row', style: 'justify-content:flex-start;gap:8px;margin:3px 0' });
+      const chk = el('input', { type: 'checkbox' });
+      chk.checked = q.xvars.includes(c);
+      chk.onchange = () => {
+        if (chk.checked) { if (!q.xvars.includes(c)) q.xvars.push(c); }
+        else q.xvars = q.xvars.filter(v => v !== c);
+        q.fit = null;
+      };
+      row.appendChild(chk);
+      row.appendChild(el('span', { text: c }));
+      row.appendChild(el('span', { class: 'pill ' + (isCat ? 'warn' : 'ok'),
+        text: isCat ? `分类(${t.levels.length})` : '数值' }));
+      box.appendChild(row);
+    });
+    pane.appendChild(box);
+
+    /* 参考类别（分类自变量） */
+    const catVars = q.xvars.filter(c => types[c] && (types[c].type === 'categorical' || types[c].type === 'binary'));
+    if (catVars.length) {
+      pane.appendChild(el('h3', { text: '参考类别（哑变量基准）', style: 'margin-top:14px' }));
+      const rbox = el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap' });
+      catVars.forEach(c => {
+        const sel = el('select', { style: 'font-size:12px;padding:3px 6px' });
+        types[c].levels.forEach(lv => {
+          const o = el('option', { value: String(lv), text: String(lv) });
+          if (String(q.reference[c]) === String(lv)) o.selected = true;
+          sel.appendChild(o);
+        });
+        sel.onchange = () => { q.reference[c] = sel.value; q.fit = null; };
+        rbox.appendChild(el('div', {}, [el('div', { class: 'muted', style: 'font-size:11px', text: c }), sel]));
+      });
+      pane.appendChild(rbox);
+    }
+
+    /* 拟合 */
+    const runRow = el('div', { style: 'display:flex;gap:8px;margin:14px 0;align-items:center' });
+    const btn = el('button', { class: 'mini', text: '拟合模型' });
+    btn.onclick = async () => {
+      btn.disabled = true; btn.textContent = '拟合中…';
+      setBusy(true, 'GLM 拟合中…');
+      q.error = null;
+      try {
+        const idxT = S.columns.indexOf(q.response);
+        if (idxT < 0) throw new Error(`目标变量「${q.response || '(未选)'}」不在当前数据里，请重新选择`);
+        const yv = S.rows.map(r => r[idxT]);
+        const badY = yv.findIndex(v => !Number.isFinite(v));
+        if (badY >= 0) throw new Error(`目标变量第 ${badY + 1} 行不是有效数值：${JSON.stringify(yv[badY])}（GLM 要求因变量为数值）`);
+        const numCols = [], catCols = [];
+        q.xvars.forEach(c => {
+          const j = S.columns.indexOf(c);
+          const t = types[c];
+          if (t.type === 'categorical' || t.type === 'binary') {
+            catCols.push({ name: c, idx: j, levels: t.levels.map(String), reference: q.reference[c] !== undefined ? String(q.reference[c]) : String(t.levels[0]) });
+          } else {
+            numCols.push({ name: c, idx: j });
+          }
+        });
+        const family = q.family || selFam.value || 'gaussian';
+        const payload = { rows: S.rows, y: yv, spec: { numCols, catCols }, family };
+        // GLM 在主线程执行：样本量通常在千级以内，IRLS 只要几十毫秒；
+        // 走 Worker 反而要克隆整张数据表，得不偿失
+        if (!numCols.length && !catCols.length) throw new Error('至少选择一个自变量');
+        // 快速自检：所选列必须全为有限数值，否则设计矩阵会出 NaN
+        for (const c of numCols) {
+          const bad = S.rows.findIndex(r => !Number.isFinite(r[c.idx]));
+          if (bad >= 0) throw new Error(`变量「${c.name}」第 ${bad + 1} 行不是有效数值（${JSON.stringify(S.rows[bad][c.idx])}）`);
+        }
+        const res = G.fit(payload);
+        q.fit = res;
+        if (family === 'binomial') {
+          q.roc = G.roc(yv, res.mu);
+          q.cm = G.confusion(yv, res.mu, q.roc.best.thr);
+        }
+      } catch (e) {
+        q.error = e.message;
+        q.fit = null;
+      }
+      setBusy(false, '就绪');
+      btn.disabled = false; btn.textContent = '拟合模型';
+      renderGLM();
+    };
+    runRow.appendChild(btn);
+    pane.appendChild(runRow);
+
+    if (q.error) {
+      pane.appendChild(el('div', { class: 'hint', style: 'border-color:#5a2020;color:#fca5a5', text: '拟合失败：' + q.error }));
+      return;
+    }
+    const f = q.fit;
+    if (!f) return;
+
+    /* 警告 */
+    if (f.warnings && f.warnings.length) {
+      f.warnings.forEach(w => {
+        const isErr = w.level === 'error';
+        pane.appendChild(el('div', { class: 'hint', style:
+          'border-color:' + (isErr ? '#5a2020' : '#5a4a1a') + ';color:' + (isErr ? '#fca5a5' : '#f5c66b'),
+          html: `<b>${isErr ? '⛔ 统计假设不成立' : '⚠ 注意'}</b>：${esc(w.text)}` }));
+      });
+    }
+
+    /* 拟合摘要 */
+    pane.appendChild(el('h3', { text: '模型摘要', style: 'margin-top:16px' }));
+    const stats = [
+      ['样本量 n', f.n], ['参数数 p', f.p], ['残差自由度', f.dfResid],
+      ['收敛', f.converged ? '是（' + f.iterations + ' 次迭代）' : '否'],
+      ['Deviance', f.deviance.toFixed(4)], ['Null deviance', f.nullDeviance.toFixed(4)],
+      ['AIC', f.aic.toFixed(2)], ['BIC', f.bic.toFixed(2)],
+      ['Pearson χ²', f.pearson.toFixed(2)],
+      ['离散参数', f.dispersion.toFixed(4)]
+    ];
+    if (f.r2 != null) stats.push(['R²', f.r2.toFixed(4)]);
+    if (f.r2adj != null) stats.push(['调整 R²', f.r2adj.toFixed(4)]);
+    if (f.rmse != null) stats.push(['RMSE', f.rmse.toFixed(4)]);
+    const st = el('div', { class: 'stat' });
+    stats.forEach(([k, v]) => st.appendChild(el('div', { html: `<span>${esc(k)}</span><b>${esc(String(v))}</b>` })));
+    pane.appendChild(st);
+
+    /* 系数表 */
+    pane.appendChild(el('h3', { text: '系数', style: 'margin-top:18px' }));
+    const isOR = f.family === 'binomial';
+    const isIRR = f.family === 'poisson';
+    const tb = el('table');
+    tb.appendChild(el('thead', { html: '<tr><th>变量</th><th>估计</th><th>标准误</th><th>' +
+      (f.family === 'gaussian' ? 't' : 'z') + '</th><th>p 值</th><th>95% CI</th>' +
+      (isOR ? '<th>OR</th><th>OR 95% CI</th>' : '') + (isIRR ? '<th>IRR</th><th>IRR 95% CI</th>' : '') + '</tr>' }));
+    const tb2 = el('tbody');
+    f.coef.forEach(c => {
+      const sig = c.p < 0.001 ? '***' : c.p < 0.01 ? '**' : c.p < 0.05 ? '*' : '';
+      tb2.appendChild(el('tr', { html:
+        `<td style="text-align:left">${esc(c.name)}</td>
+         <td>${c.est.toFixed(4)}</td>
+         <td>${c.se.toFixed(4)}</td>
+         <td>${Number.isFinite(c.stat) ? c.stat.toFixed(2) : '-'}</td>
+         <td style="color:${c.p < 0.05 ? '#34d399' : 'var(--dim)'}">${c.p < 0.0001 ? '<0.0001' : c.p.toFixed(4)} ${sig}</td>
+         <td>[${c.lo.toFixed(3)}, ${c.hi.toFixed(3)}]</td>` +
+        (isOR ? `<td><b>${c.exp.toFixed(3)}</b></td><td>[${c.expLo.toFixed(3)}, ${c.expHi.toFixed(3)}]</td>` : '') +
+        (isIRR ? `<td><b>${c.exp.toFixed(3)}</b></td><td>[${c.expLo.toFixed(3)}, ${c.expHi.toFixed(3)}]</td>` : '') +
+        '</tr>' }));
+    });
+    tb.appendChild(tb2);
+    pane.appendChild(tb);
+    pane.appendChild(el('div', { class: 'muted', style: 'margin-top:6px;font-size:11.5px',
+      text: '显著性标记：*** p<0.001, ** p<0.01, * p<0.05。p 值基于正态近似（Gaussian 用 t）。' }));
+
+    /* 编码说明 */
+    if (f.codings && f.codings.length) {
+      pane.appendChild(el('h3', { text: '分类变量编码', style: 'margin-top:16px' }));
+      const t2 = el('table');
+      t2.appendChild(el('thead', { html: '<tr><th>变量</th><th>参考类别</th><th>哑变量</th></tr>' }));
+      const b2 = el('tbody');
+      f.codings.forEach(c => b2.appendChild(el('tr', { html:
+        `<td>${esc(c.name)}</td><td>${esc(c.reference)}</td><td>${c.dummies.map(d => esc(d)).join('、')}</td>` })));
+      t2.appendChild(b2);
+      pane.appendChild(t2);
+    }
+
+    /* 森林图（OR / IRR） */
+    if (isOR || isIRR) {
+      const terms = f.coef.slice(1).filter(c => Number.isFinite(c.exp));
+      if (terms.length) {
+        const W = 660, H = 40 + terms.length * 26, padL = 150, padR = 40;
+        const g = mkSvg(W, H);
+        const lo = Math.min(...terms.map(t => t.expLo), 0.5);
+        const hi = Math.max(...terms.map(t => t.expHi), 2);
+        const sx = v => padL + (Math.log(v) - Math.log(lo)) / (Math.log(hi) - Math.log(lo)) * (W - padL - padR);
+        // 参考线 x=1
+        g.appendChild(mkLine(sx(1), 20, sx(1), H - 12, '#3a5570', 1, '4 3'));
+        g.appendChild(mkText(sx(1), H - 1, '1', '#5d7387', 10, 'middle'));
+        terms.forEach((t, i) => {
+          const y = 32 + i * 26;
+          g.appendChild(mkText(padL - 8, y + 4, t.name, '#8aa0b4', 11, 'end'));
+          g.appendChild(mkLine(sx(t.expLo), y, sx(t.expHi), y, '#4c9aff', 1.6));
+          g.appendChild(mkCircle(sx(t.exp), y, 4.5, t.p < 0.05 ? '#34d399' : '#5d7387'));
+          g.appendChild(mkText(W - padR + 6, y + 4, t.exp.toFixed(2), '#8aa0b4', 11, 'start'));
+        });
+        pane.appendChild(el('h3', { text: (isOR ? 'OR' : 'IRR') + ' 森林图（对数刻度）', style: 'margin-top:18px' }));
+        pane.appendChild(g);
+        pane.appendChild(el('div', { class: 'muted', style: 'margin-top:4px;text-align:center',
+          text: '横线 = 95% 置信区间；点 = 点估计；绿色 = p<0.05；竖虚线 = 无效线（1）' }));
+      }
+    }
+
+    /* Logistic：ROC + 混淆矩阵 */
+    if (q.roc && q.cm) {
+      pane.appendChild(el('h3', { text: '判别能力（Logistic）', style: 'margin-top:18px' }));
+      pane.appendChild(el('div', { class: 'stat' }, [
+        el('div', { html: `<span>AUC</span><b>${q.roc.auc.toFixed(3)}</b>` }),
+        el('div', { html: `<span>最佳阈值</span><b>${q.roc.best.thr.toFixed(3)}</b>` }),
+        el('div', { html: `<span>准确率</span><b>${(q.cm.acc * 100).toFixed(1)}%</b>` }),
+        el('div', { html: `<span>敏感度 / 特异度</span><b>${(q.cm.sens * 100).toFixed(1)}% / ${(q.cm.spec * 100).toFixed(1)}%</b>` })
+      ]));
+      const W2 = 380, H2 = 300, pad2 = 40;
+      const g2 = mkSvg(W2, H2);
+      g2.appendChild(mkLine(pad2, H2 - pad2, W2 - pad2, H2 - pad2, '#3a5570'));
+      g2.appendChild(mkLine(pad2, pad2, pad2, H2 - pad2, '#3a5570'));
+      g2.appendChild(mkLine(pad2, H2 - pad2, W2 - pad2, pad2, '#22313f', 1, '3 3'));
+      let d = '';
+      q.roc.points.forEach((p, i) => {
+        const x = pad2 + p.fpr * (W2 - pad2 * 2);
+        const y = H2 - pad2 - p.tpr * (H2 - pad2 * 2);
+        d += (i === 0 ? 'M' : 'L') + x.toFixed(1) + ' ' + y.toFixed(1);
+      });
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('d', d);
+      path.setAttribute('fill', 'none');
+      path.setAttribute('stroke', '#4c9aff');
+      path.setAttribute('stroke-width', '2');
+      g2.appendChild(path);
+      g2.appendChild(mkText(W2 / 2, H2 - 8, 'False Positive Rate', '#8aa0b4', 10, 'middle'));
+      g2.appendChild(mkText(12, pad2 - 12, 'TPR', '#8aa0b4', 10, 'start'));
+      g2.appendChild(mkText(W2 - pad2, pad2 - 8, `AUC ${q.roc.auc.toFixed(3)}`, '#34d399', 11, 'end'));
+      pane.appendChild(el('div', { style: 'display:flex;gap:20px;flex-wrap:wrap;margin-top:10px' }, [g2]));
+
+      const t3 = el('table');
+      t3.appendChild(el('thead', { html: '<tr><th>真实 \\ 预测</th><th>0</th><th>1</th></tr>' }));
+      const b3 = el('tbody');
+      [[0, '0', q.cm.tn, q.cm.fn], [1, '1', q.cm.fp, q.cm.tp]].forEach(([_, lab, a2, b2]) => {
+        b3.appendChild(el('tr', { html: `<td>${lab}</td><td style="color:${a2 ? '#34d399' : '#5d7387'}">${a2}</td><td style="color:${b2 ? '#34d399' : '#5d7387'}">${b2}</td>` }));
+      });
+      t3.appendChild(b3);
+      pane.appendChild(t3);
+    }
+
+    /* VIF */
+    if (f.diagnostics && f.diagnostics.vif && f.diagnostics.vif.length) {
+      const vs = f.diagnostics.vif.filter(v => Number.isFinite(v.vif));
+      if (vs.length) {
+        pane.appendChild(el('h3', { text: '共线性（VIF）', style: 'margin-top:16px' }));
+        const t4 = el('table');
+        t4.appendChild(el('thead', { html: '<tr><th>变量</th><th>VIF</th><th>判读</th></tr>' }));
+        const b4 = el('tbody');
+        vs.forEach(v => {
+          const tag = v.vif > 10 ? '<span class="pill bad">严重共线</span>'
+            : v.vif > 5 ? '<span class="pill warn">需注意</span>' : '<span class="pill ok">正常</span>';
+          b4.appendChild(el('tr', { html: `<td>${esc(v.name)}</td><td>${v.vif.toFixed(2)}</td><td>${tag}</td>` }));
+        });
+        t4.appendChild(b4);
+        pane.appendChild(t4);
+      }
+    }
+
+    pane.appendChild(el('div', { class: 'rule', style: 'margin-top:14px;border-left-color:#4c9aff;cursor:default', html:
+      '<b>解释边界</b>：系数反映条件关联（控制其他变量后），<b>不等于因果效应</b>。' +
+      '要论证因果，需要随机化、工具变量、DID 或断点回归等识别策略。' }));
+  }
 
   /* ---------------- Bootstrap 稳定性实验室 ---------------- */
   function bootState() {
