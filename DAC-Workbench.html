@@ -4303,8 +4303,12 @@ window.__DATASETS__ = {"iris": {"name": "鸢尾花（UCI Iris，150 条）", "de
       bar.appendChild(b1); bar.appendChild(b2); bar.appendChild(b3);
       pane.parentNode.insertBefore(bar, pane);
     }
-    if (!S.res && S.tab !== 'guide') {
-      pane.innerHTML = '<div class="muted">先导入数据并运行分析。</div>';
+    // 只有真正依赖 DAC 主分析结果的页签才需要 S.res；
+    // 数据质量 / 统计建模 / Bootstrap 是独立功能，不该被挡住
+    const NEEDS_RES = ['corr', 'calib', 'scene', 'rules', 'net', 'bn', 'robust', 'ai', 'report'];
+    if (!S.res && NEEDS_RES.indexOf(S.tab) >= 0) {
+      pane.innerHTML = '<div class="muted">这个页签需要先运行 DAC 分析（第 4 步）。<br>' +
+        '若只想做统计建模，切到「统计建模」——它不依赖 DAC 结果。</div>';
       return;
     }
     switch (S.tab) {
@@ -5428,12 +5432,37 @@ window.__DATASETS__ = {"iris": {"name": "鸢尾花（UCI Iris，150 条）", "de
         // GLM 在主线程执行：样本量通常在千级以内，IRLS 只要几十毫秒；
         // 走 Worker 反而要克隆整张数据表，得不偿失
         if (!numCols.length && !catCols.length) throw new Error('至少选择一个自变量');
-        // 快速自检：所选列必须全为有限数值，否则设计矩阵会出 NaN
+
+        // 缺失值处理：GLM 不做隐式删除，必须先补齐并记录
+        const usedIdx = [idxT].concat(numCols.map(c => c.idx), catCols.map(c => c.idx));
+        const isNull = v => v === null || v === undefined || (typeof v === 'number' && !Number.isFinite(v));
+        let missCells = 0, missRows = 0;
+        S.rows.forEach(r => {
+          let rowHas = false;
+          usedIdx.forEach(j => { if (isNull(r[j])) { missCells++; rowHas = true; } });
+          if (rowHas) missRows++;
+        });
+        let rowsUse = S.rows;
+        if (missCells > 0) {
+          // 只用训练数据（此处为全量描述性建模）拟合填补器；分类列自动转众数
+          const P = window.DACPre;
+          if (!P) throw new Error('预处理模块未加载，无法处理缺失值');
+          const im = P.fitImputer(S.rows, S.columns, { strategy: 'median', fallback: 'median' });
+          rowsUse = P.transformImputer(S.rows, im, S.rows).matrix;
+          const still = rowsUse.some(r => usedIdx.some(j => isNull(r[j])));
+          if (still) throw new Error('填补后仍有缺失（该列可能整列为空），请先剔除该变量');
+        }
+        payload.rows = rowsUse;
+
+        // 填补后再做数值校验
         for (const c of numCols) {
-          const bad = S.rows.findIndex(r => !Number.isFinite(r[c.idx]));
-          if (bad >= 0) throw new Error(`变量「${c.name}」第 ${bad + 1} 行不是有效数值（${JSON.stringify(S.rows[bad][c.idx])}）`);
+          const bad = rowsUse.findIndex(r => !Number.isFinite(r[c.idx]));
+          if (bad >= 0) throw new Error(`变量「${c.name}」第 ${bad + 1} 行不是有效数值（${JSON.stringify(rowsUse[bad][c.idx])}）`);
         }
         const res = G.fit(payload);
+        res.imputeInfo = missCells > 0
+          ? { cells: missCells, rows: missRows, method: '中位数（分类列用众数）' }
+          : null;
         q.fit = res;
         if (family === 'binomial') {
           q.roc = G.roc(yv, res.mu);
@@ -5465,6 +5494,15 @@ window.__DATASETS__ = {"iris": {"name": "鸢尾花（UCI Iris，150 条）", "de
           'border-color:' + (isErr ? '#5a2020' : '#5a4a1a') + ';color:' + (isErr ? '#fca5a5' : '#f5c66b'),
           html: `<b>${isErr ? '⛔ 统计假设不成立' : '⚠ 注意'}</b>：${esc(w.text)}` }));
       });
+    }
+
+    /* 缺失值提示 */
+    if (f.imputeInfo) {
+      pane.appendChild(el('div', { class: 'hint', style: 'border-color:#5a4a1a;color:#f5c66b', html:
+        `<b>缺失值已填补</b>：涉及 ${f.imputeInfo.cells} 个单元格 / ${f.imputeInfo.rows} 行，` +
+        `策略 = ${esc(f.imputeInfo.method)}。<br>` +
+        '<span class="muted">GLM 不做隐式删除——填补会低估标准误，样本缺失较多时结论宜保守。' +
+        '若要严格起见，请先导出填补后的数据或改用完整案例。</span>' }));
     }
 
     /* 拟合摘要 */
