@@ -111,10 +111,13 @@ test('加权抽样：高权重被抽中更多', () => {
   const cnt0 = s[0].filter(i => i === 0).length;
   assert(cnt0 >= 10, `高权重样本应被多次抽中，实际 ${cnt0}`);
 });
-test('加权边界：权重全为 0 不崩溃', () => {
-  const weights = new Array(20).fill(0);
-  const s = B.sampleIndices({ n: 20, B: 2, seed: 1, method: 'weighted', weights, fraction: 1 });
-  assert(Array.isArray(s) && s.length === 2, '应正常返回');
+test('加权边界：权重全为 0 明确报错（契约）', () => {
+  // V3.4 起：全零权重不再是"容忍"，而是直接报错——无法定义抽样分布
+  let threw = false;
+  try {
+    B.sampleIndices({ n: 10, B: 3, seed: 1, method: 'weighted', weights: new Array(10).fill(0) });
+  } catch (e) { threw = /全为 0/.test(e.message); }
+  assert(threw, '全零权重应报错');
 });
 
 /* ============ 4. 共聚类 ============ */

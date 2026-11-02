@@ -713,7 +713,8 @@
     }
     // 只有真正依赖 DAC 主分析结果的页签才需要 S.res；
     // 数据质量 / 统计建模 / Bootstrap 是独立功能，不该被挡住
-    const NEEDS_RES = ['corr', 'calib', 'scene', 'rules', 'net', 'bn', 'robust', 'ai', 'report'];
+    // AI 页不依赖主分析：可以先配置接口、问方法论问题（复核报告第六节要求）
+    const NEEDS_RES = ['corr', 'calib', 'scene', 'rules', 'net', 'bn', 'robust', 'report'];
     if (!S.res && NEEDS_RES.indexOf(S.tab) >= 0) {
       pane.innerHTML = '<div class="muted">这个页签需要先运行 DAC 分析（第 4 步）。<br>' +
         '若只想做统计建模，切到「统计建模」——它不依赖 DAC 结果。</div>';
@@ -2121,7 +2122,8 @@
 
     const selMethod = el('select', {});
     [['iid', '行级 IID（默认）'], ['group', '分组 Cluster（整组抽）'],
-     ['stratified', '分层 Stratified'], ['weighted', '加权 Weighted']]
+     ['stratified', '分层 Stratified'], ['weighted', '加权 Weighted（多项重采样）'],
+     ['pps', '系统 PPS（按规模等距）'], ['block', '块抽样 Block（时间依赖）']]
       .forEach(([v, l]) => { const o = el('option', { value: v, text: l }); if (q.method === v) o.selected = true; selMethod.appendChild(o); });
     selMethod.onchange = () => { q.method = selMethod.value; };
 
@@ -2185,7 +2187,14 @@
           labels: C.LEVEL_LABELS[S.params.levels || 3],
           yName: task,
           groups: gCol ? S.rows.map(r => r[S.columns.indexOf(gCol)]) : null,
-          weights: wCol ? S.rows.map(r => r[S.columns.indexOf(wCol)]) : null
+          weights: wCol ? S.rows.map(r => r[S.columns.indexOf(wCol)]) : null,
+          // 分层变量：优先用角色标记为 strata 的列，否则用目标变量的原始类别
+          strata: (function () {
+            const sCol = S.columns.find(c => S.roles[c] === 'strata');
+            if (sCol) return S.rows.map(r => r[S.columns.indexOf(sCol)]);
+            const th = S.columns.indexOf(S.target);
+            return th >= 0 ? S.rows.map(r => String(r[th])) : null;
+          })()
         };
         const opt = {
           task: q.task, B: q.B, seed: q.seed, method: q.method, fraction: q.fraction,
@@ -2579,6 +2588,173 @@
     return set;
   }
   /* 允许"派生数字"：模型常做差值、比值、占比这类合法运算 */
+  /**
+   * 统一构建发给 AI 的上下文。
+   * 原则：
+   *  · 只发聚合统计，绝不发原始行
+   *  · 每个数字带 metricId + 阶段，便于审计时说清出处
+   *  · 未运行的分析显式写"未运行"，不留空让人猜
+   *  · 预览与实际请求走同一个函数，不可能出现"说的和发的不一致"
+   */
+  function buildAIContext(question) {
+    const L = [];
+    const metrics = [];
+    const add = (id, label, value, unit, stage) => {
+      metrics.push({ id, label, value, unit: unit || '', stage: stage || '' });
+      return `${label} = ${value}${unit || ''}（${stage || '描述'}）`;
+    };
+    const has = (x) => x !== null && x !== undefined && Number.isFinite(x);
+    const f2 = (x) => (has(x) ? x.toFixed(2) : '—');
+    const pct = (x) => (has(x) ? (x * 100).toFixed(1) + '%' : '—');
+    const r = S.res;
+
+    /* ---- 1. 数据集与目标 ---- */
+    L.push('【数据集】');
+    const dsName = (S.dsMeta && S.dsMeta.name) || S.meta && S.meta.name || '（用户导入）';
+    L.push(`名称：${dsName}`);
+    L.push(`规模：${S.rows.length} 行 × ${S.columns.length} 列；数值列 ${S.numeric.length} 个`);
+    if (S.dsMeta) {
+      L.push(`推荐目标：${S.dsMeta.recommendedTarget}（类型 ${S.dsMeta.targetType}，任务 ${S.dsMeta.task}）`);
+      if (S.dsMeta.note) L.push(`数据说明：${S.dsMeta.note}`);
+      if (S.dsMeta.caveatPredictors && S.dsMeta.caveatPredictors.length) {
+        L.push(`预测时点提醒：${S.dsMeta.caveatPredictors.join('、')} 是否可用取决于预测发生在何时`);
+      }
+    }
+    L.push(`当前分析目标：${S.target || '（未选）'}`);
+
+    /* ---- 2. 目标原始分布与校准分布 ---- */
+    if (r && r.calibration && r.calibration.target) {
+      const tg = r.calibration.target;
+      L.push('');
+      L.push('【目标变量分布】');
+      L.push(`校准后等级计数：${tg.counts.join(' / ')}（共 ${tg.counts.reduce((a, b) => a + b, 0)} 条）`);
+      add('target.counts', '目标等级计数', tg.counts.join('/'), '条', '校准后');
+      const empty = tg.counts.filter(v => v === 0).length;
+      if (empty > 0) L.push(`⚠ 有 ${empty} 个等级为空——等级划分可能不适用`);
+      if (tg.thresholds) L.push(`切点：${tg.thresholds.map(t => (+t).toFixed(2)).join(' / ')}`);
+    }
+
+    /* ---- 3. 条件变量类型与低基数警示 ---- */
+    if (r && r.meta && r.meta.factors && r.meta.factors.length) {
+      L.push('');
+      L.push('【条件变量】');
+      const lowCard = [];
+      r.meta.factors.forEach(f => {
+        const j = S.columns.indexOf(f);
+        if (j < 0) return;
+        const u = new Set(S.rows.map(rr => rr[j])).size;
+        if (u <= 2) lowCard.push(`${f}(${u} 个取值)`);
+      });
+      L.push(`条件变量个数：${r.meta.factors.length}`);
+      if (lowCard.length) {
+        L.push(`⚠ 低基数变量（≤2 个取值，仍按多等级校准，中间等级必然为空）：${lowCard.join('、')}`);
+      }
+    }
+
+    /* ---- 4. 样本流向 ---- */
+    L.push('');
+    L.push('【样本流向】');
+    const total = S.rows.length;
+    let missingCells = 0, missingRows = 0;
+    S.rows.forEach(rr => {
+      let rowHas = false;
+      S.columns.forEach((_, j) => {
+        const v = rr[j];
+        if (v === null || v === undefined || (typeof v === 'number' && !Number.isFinite(v))) { missingCells++; rowHas = true; }
+      });
+      if (rowHas) missingRows++;
+    });
+    L.push(`缺失：${missingCells} 个单元格，涉及 ${missingRows} 行`);
+    add('data.missingCells', '缺失单元格', missingCells, '个', '描述');
+    if (r && r.excludedByTarget) {
+      L.push(`目标缺失排除：${r.excludedByTarget.length} 行`);
+    }
+
+    /* ---- 5. 严格交叉验证 ---- */
+    L.push('');
+    L.push('【严格交叉验证】');
+    const strictCv = S.extra && S.extra.strict;
+    if (strictCv && strictCv.ok) {
+      L.push(`折数：${strictCv.k}；分组：${strictCv.grouped ? '是' : '否'}`);
+      L.push(`OOF 准确率：${pct(strictCv.oof.accuracy)}（n=${strictCv.oof.n}）`);
+      L.push(`OOF Balanced Accuracy：${pct(strictCv.oof.balancedAccuracy)}；Macro-F1：${f2(strictCv.oof.macroF1)}`);
+      L.push(`训练均值 ${pct(strictCv.trainMean)} vs 验证均值 ${pct(strictCv.mean)}（差 ${(strictCv.gap * 100).toFixed(1)} 个百分点）`);
+      add('cv.oofAcc', 'OOF 准确率', pct(strictCv.oof.accuracy), '', '严格 CV');
+      add('cv.gap', '训练-验证差', (strictCv.gap * 100).toFixed(1), '个百分点', '严格 CV');
+      if (S.extra && S.extra.audit && S.extra.audit.items) {
+        const fails = S.extra.audit.items.filter(i => i.status === 'FAIL');
+        L.push(`泄漏审计：${fails.length === 0 ? '全部通过' : fails.map(f => f.name).join('、') + ' 未通过'}`);
+        if (fails.length) add('audit.fail', '审计未通过项', fails.length, '项', '严格 CV');
+      }
+    } else {
+      L.push('未运行（不要假设已有泛化结论）');
+    }
+
+    /* ---- 6. 普通 CV 与训练表现 ---- */
+    if (r && r.cv) {
+      L.push('');
+      L.push('【普通 5 折 CV（诊断性质，非严格验证）】');
+      L.push(`训练 ${pct(r.cv.trainAccuracy)} vs 测试 ${pct(r.cv.accuracy)}`);
+    }
+
+    /* ---- 7. Bootstrap 稳定性 ---- */
+    L.push('');
+    L.push('【Bootstrap 稳定性】');
+    const bt = S.extra && S.extra.boot && S.extra.boot.result;
+    if (bt && bt.okCount > 0) {
+      L.push(`方法：${bt.method}${bt.blockType ? '/' + bt.blockType : ''}；B=${bt.B}；成功 ${bt.okCount} 次，失败 ${bt.failCount || 0} 次`);
+      if (bt.summary && bt.summary.cluster) {
+        L.push(`ARI 均值 ${f2(bt.summary.cluster.ariMean)}（区间 ${f2(bt.summary.cluster.ariLo)}~${f2(bt.summary.cluster.ariHi)}）`);
+        add('boot.ari', 'Bootstrap ARI 均值', f2(bt.summary.cluster.ariMean), '', '稳定性');
+      }
+      if (bt.summary && bt.summary.rules && bt.summary.rules.oob) {
+        const o = bt.summary.rules.oob;
+        L.push(`OOB 准确率 ${pct(o.accuracy)}（覆盖率 ${pct(o.coverage)}，${o.runs} 轮）`);
+        add('boot.oob', 'OOB 准确率', pct(o.accuracy), '', '袋外验证');
+      }
+      L.push('注意：ARI/规则频率衡量的是结构稳定性，不是监督准确率，也不是因果效应');
+    } else {
+      L.push('未运行');
+    }
+
+    /* ---- 8. 特征泄漏筛查 ---- */
+    L.push('');
+    L.push('【特征泄漏筛查】');
+    const leak = S.extra && S.extra.leakFeatures;
+    if (leak && leak.length) {
+      L.push(`发现 ${leak.length} 个 |r| > 0.95 的特征：` +
+        leak.map(x => `${x.name}(r=${f2(x.r)})`).join('、'));
+      add('leak.count', '高相关特征数', leak.length, '个', '泄漏筛查');
+      L.push('注意：高相关只是风险筛查，不等于确认泄漏——需结合业务时点判断');
+    } else {
+      L.push('未发现 |r| > 0.95 的特征（若未运行主分析，这里不代表"已检查"）');
+    }
+
+    /* ---- 9. 有效性与告警 ---- */
+    L.push('');
+    L.push('【结果有效性】');
+    if (r) {
+      const warns = [];
+      if (r.cv && r.cv.trainAccuracy >= 0.99 && r.cv.accuracy >= 0.99) warns.push('训练与 CV 都接近 100%，高度可疑');
+      if (r.calibration && r.calibration.target) {
+        const c = r.calibration.target.counts;
+        if (c.filter(v => v === 0).length > 0) warns.push('目标存在空等级');
+      }
+      L.push(warns.length ? warns.join('；') : '未见明显异常');
+    } else {
+      L.push('主分析未运行，除数据描述外的结论都不可得');
+    }
+
+    /* ---- 10. 用户问题 ---- */
+    if (question) {
+      L.push('');
+      L.push('【用户问题】');
+      L.push(question);
+    }
+
+    return { text: L.join('\n'), metrics };
+  }
+
   function expandNumbers(base) {
     const set = new Set(base);
     const arr = [...base].filter(x => x > 0 && x < 1e6).slice(0, 60);
@@ -2619,15 +2795,21 @@
   function renderAI() {
     const pane = $('#pane'), r = S.res, cfg = aiCfg();
     pane.innerHTML = '';
-    if (!r) {
-      pane.innerHTML = '<div class="muted">先跑一次分析，AI 才能基于真实结果给建议。</div>';
-      return;
-    }
+    // AI 页不依赖主分析：可以先配置、可以先问方法论问题
     pane.appendChild(el('div', { class: 'muted', html:
-      'AI 只做两件事：<b>推荐参数</b> 和 <b>写文字</b>。所有数字必须来自本地计算，模型编造的数字会被标红。' }));
+      'AI 只做两件事：<b>推荐参数</b> 和 <b>写文字</b>。所有数字必须来自本地计算，模型编造的数字会被标红。' +
+      (r ? '' : '<br><b>当前还没有分析结果</b>——你仍可以配置接口、问方法论问题；涉及数据的结论会在跑完分析后才可用。') }));
 
-    // 接入设置
-    const box = el('div', { class: 'card', style: 'margin-top:12px;background:#0f1a24' });
+    // 接入设置：已配置则默认折叠，避免把对话挤到首屏以下
+    const cfgReady = !!(cfg && cfg.key);
+    const boxWrap = el('details', { style: 'margin-top:12px' });
+    if (!cfgReady) boxWrap.open = true;
+    boxWrap.appendChild(el('summary', {
+      style: 'cursor:pointer;font-size:12.5px;color:var(--dim);padding:6px 0;user-select:none',
+      text: (cfgReady ? '接入设置（已配置 ' + esc(cfg.model || 'default') + ' · 点击展开修改）'
+                      : '接入设置（还没填 Key，点这里配置）')
+    }));
+    const box = el('div', { class: 'card', style: 'margin-top:8px;background:#0f1a24' });
     box.appendChild(el('h3', { text: '接入设置（存在浏览器本地，不上传）', style: 'margin-bottom:10px;font-size:12px' }));
     const grid = el('div', { style: 'display:grid;grid-template-columns:1fr 1fr;gap:8px' });
     const selP = el('select', {});
@@ -2744,7 +2926,8 @@
     box.appendChild(persistRow);
     box.appendChild(riskHint);
     box.appendChild(testOut);
-    pane.appendChild(box);
+    boxWrap.appendChild(box);
+    pane.appendChild(boxWrap);
 
     // 发送前预览：让用户先看清要把什么发给第三方
     const preview = el('div', { class: 'hint', style: 'display:none' });
@@ -2897,7 +3080,8 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
       '1. 只能使用给定 JSON 中出现的数字。不得编造、不得估算、不得写"大约/左右"。',
       '2. 不得自己重新计算统计量（相关系数、准确率、p 值等）。',
       '3. 稳定性 ≠ 准确率；相关 ≠ 因果；边频率 ≠ 因果概率。',
-      '4. 若结果里有 leakFeatures（疑似特征泄漏），必须在最前面指出。',
+      '4. 上下文里已包含「严格交叉验证」「Bootstrap 稳定性」「特征泄漏筛查」「结果有效性」四节。' +
+      '凡是标注"未运行"的项，你不能当作已完成；凡是高相关特征，只在最前面提示风险，不得直接断言泄漏。',
       '5. 未做统计检验时，不要用"显著"这个词。',
       '',
       '输出结构（严格遵守，中文，不要多余的客套）：',
@@ -2965,8 +3149,11 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
       bSend.textContent = '…';
       ta.value = '';
       try {
-        // 结果 JSON 只挂在最后一条用户消息上，避免每轮重复传大 payload
-        const ctx = '\n\n【分析结果 JSON】\n' + JSON.stringify(brief(), null, 1);
+        // 上下文由 buildAIContext 统一构建（含严格 CV / Bootstrap / 泄漏筛查 / 有效性），
+        // 只发聚合统计，不发原始行；结果 JSON 仅挂最后一条，避免重复传大 payload
+        const ctxObj = buildAIContext(null);
+        const ctx = '\n\n【分析上下文】\n' + ctxObj.text +
+          '\n\n【结果 JSON】\n' + JSON.stringify(r ? brief() : { note: '主分析未运行' }, null, 1);
         const hist = chat.slice(-8, -1).map(m => ({ role: m.role, content: m.content }));
         const msgs = [{ role: 'system', content: SYS_PROMPT }]
           .concat(hist)
@@ -2976,7 +3163,7 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
         const txt2 = r2.content;
         const ms = Math.round(performance.now() - t0);
         let bad = [];
-        try { bad = auditNumbers(txt2, r) || []; } catch (e) { bad = []; }
+        try { bad = r ? (auditNumbers(txt2, r) || []) : []; } catch (e) { bad = []; }
         const meta = `${ms}ms · ` + (bad.length
           ? `${bad.length} 个数字未在结果中找到：${bad.slice(0, 4).join(', ')}`
           : '数字溯源通过');
@@ -2988,9 +3175,15 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
       bSend.textContent = '发送';
       renderChat();
     };
-    bSend.onclick = () => send(ta.value);
+    bSend.onclick = () => { if (!bSend.disabled) send(ta.value); };
     ta.onkeydown = e => {
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(ta.value); }
+      // 中文输入法确认候选时会触发 keydown，此时不能当作发送
+      if (e.isComposing || e.keyCode === 229) return;
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        if (bSend.disabled) return;   // 请求进行中防重复发送
+        send(ta.value);
+      }
     };
 
     const quick = el('div', { style: 'display:flex;gap:6px;flex-wrap:wrap;margin-top:9px' });

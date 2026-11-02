@@ -82,43 +82,91 @@
    * @param {object} o { n, B, seed, fraction, replacement, method, groups, strata, weights }
    * @returns {Array<Array<number>>} 每次的索引数组（长度可能 < n）
    */
+  /**
+   * 生成 B 组重采样索引。
+   * 抽样契约（违反直接报错，不静默降级为 IID）：
+   *  - group      : 必须给 groups（长度 = n），整组进出
+   *  - stratified : 必须给 strata（长度 = n），层内独立抽
+   *  - weighted   : 必须给 weights（长度 = n，非负有限、不全零）；零权重永不被抽中
+   *  - pps        : 系统 PPS（与 weighted 区分：这是"按规模系统抽"，不是多项重采样）
+   *  - block      : 见 sampleBlockIndices
+   */
   function sampleIndices(o) {
-    const n = o.n;
-    const B = o.B;
+    const n = o.n, B = o.B;
     const frac = o.fraction === undefined ? 1 : o.fraction;
     const repl = o.replacement !== false;
     const rnd = makeRng(o.seed === undefined ? 42 : o.seed);
     const out = [];
+    const meta = { method: o.method || 'iid', replacement: repl, fraction: frac, unit: 'row', groupsSampled: null };
 
-    const pickWeighted = (pool, k) => {
-      // 权重抽样的系统抽样（PPS），避免 O(n·k)
-      const w = pool.map(i => (o.weights && o.weights[i] > 0 ? o.weights[i] : 1));
+    /* ---------- 契约校验 ---------- */
+    const checkLen = (arr, name) => {
+      if (!arr || arr.length !== n) {
+        throw new Error(`${name} 抽样未提供合法的 ${name} 向量（需长度 ${n}，实际 ${arr ? arr.length : 0}）。` +
+          '请在界面上指定对应的列，或改用 IID 抽样。');
+      }
+    };
+    if (o.method === 'group') checkLen(o.groups, '分组');
+    if (o.method === 'stratified') checkLen(o.strata, '分层');
+    if (o.method === 'weighted' || o.method === 'pps') {
+      checkLen(o.weights, '加权');
+      if (o.weights.some(v => !Number.isFinite(v) || v < 0)) {
+        throw new Error('权重必须是非负有限数（发现负数或 NaN）。');
+      }
+      if (o.weights.every(v => v === 0)) {
+        throw new Error('权重列全为 0，无法抽样。');
+      }
+    }
+
+    if (o.method === 'block') {
+      return sampleBlockIndices({ n, B, seed: o.seed, blockType: o.blockType, blockLength: o.blockLength }).indices;
+    }
+
+    /* ---------- 工具 ---------- */
+    // 标准加权多项抽样：累积权重 + 二分，允许重复（有放回的定义）
+    const pickMultinomial = (pool, k) => {
+      const w = pool.map(i => (Number.isFinite(o.weights[i]) && o.weights[i] > 0 ? o.weights[i] : 0));
       const total = w.reduce((a, b) => a + b, 0);
+      const cum = [];
+      let acc = 0;
+      for (let i = 0; i < pool.length; i++) { acc += w[i]; cum.push(acc); }
       const res = [];
+      for (let c = 0; c < k; c++) {
+        const u = rnd() * total;
+        let lo = 0, hi = cum.length - 1;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          if (cum[mid] <= u) lo = mid + 1; else hi = mid;
+        }
+        res.push(pool[lo]);
+      }
+      return res;
+    };
+    // 系统 PPS：按累计规模等距取点（与多项抽样不同，不产生"同一样本被抽多次"的独立计数）
+    const pickPPS = (pool, k) => {
+      const w = pool.map(i => (Number.isFinite(o.weights[i]) && o.weights[i] > 0 ? o.weights[i] : 0));
+      const total = w.reduce((a, b) => a + b, 0);
       const step = total / k;
+      const res = [];
       let pos = rnd() * step;
-      let acc = 0, idx = 0;
       for (let c = 0; c < k; c++) {
         const target = pos + c * step;
-        while (idx < pool.length - 1 && acc + w[idx] < target) { acc += w[idx]; idx++; }
-        res.push(pool[idx]);
+        let acc = 0, chosen = pool[pool.length - 1];
+        for (let i = 0; i < pool.length; i++) {
+          acc += w[i];
+          if (acc > target) { chosen = pool[i]; break; }
+        }
+        res.push(chosen);
       }
       return res;
     };
 
-    // 时间依赖数据必须用块抽样，不能用 IID 冒充
-    if (o.method === 'block') {
-      return sampleBlockIndices({
-        n, B, seed: o.seed, blockType: o.blockType, blockLength: o.blockLength
-      }).indices;
-    }
-
+    /* ---------- 抽样 ---------- */
     for (let b = 0; b < B; b++) {
       let idx = [];
       const k = Math.max(2, Math.round(n * frac));
 
-      if (o.method === 'group' && o.groups) {
-        // 整组重采样：组是被抽单位，组内全部记录一起进入
+      if (o.method === 'group') {
         const byGroup = new Map();
         o.groups.forEach((g, i) => {
           const key = String(g);
@@ -127,26 +175,57 @@
         });
         const keys = [...byGroup.keys()];
         const picked = [];
-        for (let c = 0; c < keys.length; c++) {
-          const gk = keys[Math.floor(rnd() * keys.length)];
-          picked.push(...byGroup.get(gk));
+        if (repl) {
+          // 有放回：抽 keys.length 个组，允许重复（整组进入）
+          for (let c = 0; c < keys.length; c++) {
+            const gk = keys[Math.floor(rnd() * keys.length)];
+            picked.push(...byGroup.get(gk));
+          }
+          meta.groupsSampled = keys.length;
+        } else {
+          // 不放回：组不重复，随机排列后取前 ceil(组数×frac) 个
+          const order = keys.slice();
+          for (let i = order.length - 1; i > 0; i--) {
+            const j = Math.floor(rnd() * (i + 1));
+            const t = order[i]; order[i] = order[j]; order[j] = t;
+          }
+          const take = Math.max(1, Math.round(order.length * frac));
+          for (let c = 0; c < take; c++) picked.push(...byGroup.get(order[c]));
+          meta.groupsSampled = take;
         }
         idx = picked;
-      } else if (o.method === 'stratified' && o.strata) {
-        // 分层重采样：每层内独立抽样，保持层结构
+        meta.unit = 'group';
+      } else if (o.method === 'stratified') {
         const byStratum = new Map();
-        o.strata.forEach((s, i) => {
-          const key = String(s);
+        o.strata.forEach((sv, i) => {
+          const key = String(sv);
           if (!byStratum.has(key)) byStratum.set(key, []);
           byStratum.get(key).push(i);
         });
         for (const pool of byStratum.values()) {
           const take = Math.max(1, Math.round(pool.length * frac));
-          for (let c = 0; c < take; c++) idx.push(pool[Math.floor(rnd() * pool.length)]);
+          if (repl) {
+            for (let c = 0; c < take; c++) idx.push(pool[Math.floor(rnd() * pool.length)]);
+          } else {
+            // 层内不放回：洗牌取前 take 个
+            const ord = pool.slice();
+            for (let i = ord.length - 1; i > 0; i--) {
+              const j = Math.floor(rnd() * (i + 1));
+              const t = ord[i]; ord[i] = ord[j]; ord[j] = t;
+            }
+            for (let c = 0; c < Math.min(take, ord.length); c++) idx.push(ord[c]);
+          }
         }
-      } else if (o.method === 'weighted' && o.weights) {
-        const kk = repl ? k : Math.min(k, n);
-        idx = pickWeighted([...Array(n).keys()], kk);
+        meta.unit = 'stratum';
+      } else if (o.method === 'weighted') {
+        if (!repl) {
+          throw new Error('加权抽样只支持有放回（加权不放回没有标准定义）。请改用有放回，或去掉权重。');
+        }
+        idx = pickMultinomial([...Array(n).keys()], k);
+        meta.unit = 'weighted';
+      } else if (o.method === 'pps') {
+        idx = pickPPS([...Array(n).keys()], k);
+        meta.unit = 'pps';
       } else {
         // IID
         if (repl) {
@@ -155,13 +234,24 @@
           const pool = [...Array(n).keys()];
           for (let i = pool.length - 1; i > 0; i--) {
             const j = Math.floor(rnd() * (i + 1));
-            [pool[i], pool[j]] = [pool[j], pool[i]];
+            const t = pool[i]; pool[i] = pool[j]; pool[j] = t;
           }
-          idx = pool.slice(0, k);
+          idx = pool.slice(0, Math.min(k, n));
         }
       }
       out.push(idx);
     }
+
+    // 不放回必须唯一
+    if (!repl && o.method !== 'group' && o.method !== 'stratified') {
+      out.forEach((idx, bi) => {
+        const u = new Set(idx);
+        if (u.size !== idx.length) {
+          throw new Error(`第 ${bi + 1} 轮不放回抽样出现重复索引（${idx.length} 个中有 ${idx.length - u.size} 个重复）`);
+        }
+      });
+    }
+    out.meta = meta;
     return out;
   }
 
