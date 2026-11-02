@@ -129,32 +129,29 @@
     return n - 1;
   }
 
-  async function parseXLSX(buf) {
-    const entries = readZip(buf);
-    const workbook = await readEntry(entries, 'xl/workbook.xml');
-    let sheetPath = 'xl/worksheets/sheet1.xml';
-    if (workbook) {
-      const m = /<sheet[^>]*r:id="rId(\d+)"/.exec(workbook);
-      const rels = await readEntry(entries, 'xl/_rels/workbook.xml.rels');
-      if (m && rels) {
-        const re = new RegExp('Id="rId' + m[1] + '"[^>]*Target="([^"]+)"');
+  /* 读 workbook，返回所有工作表（名称 + 路径） */
+  async function xlsxSheets(entries) {
+    const wb = await readEntry(entries, 'xl/workbook.xml');
+    const rels = await readEntry(entries, 'xl/_rels/workbook.xml.rels');
+    const out = [];
+    if (!wb) return out;
+    for (const m of wb.matchAll(/<sheet\b([^>]*)\/?>/g)) {
+      const attrs = m[1];
+      const nameM = /name="([^"]*)"/.exec(attrs);
+      const idM = /r:id="rId(\d+)"/.exec(attrs);
+      const name = nameM ? nameM[1].replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>') : 'Sheet';
+      let target = null;
+      if (idM && rels) {
+        const re = new RegExp('Id="rId' + idM[1] + '"[^>]*Target="([^"]+)"');
         const t = re.exec(rels);
-        if (t) sheetPath = 'xl/' + t[1].replace(/^\/?xl\//, '');
+        if (t) target = 'xl/' + t[1].replace(/^\/?xl\//, '');
       }
+      out.push({ name, path: target });
     }
-    const sheet = await readEntry(entries, sheetPath);
-    if (!sheet) throw new Error('未找到工作表数据');
+    return out;
+  }
 
-    let shared = [];
-    const sst = await readEntry(entries, 'xl/sharedStrings.xml');
-    if (sst) {
-      shared = [...sst.matchAll(/<si>([\s\S]*?)<\/si>/g)].map(m =>
-        [...m[1].matchAll(/<t[^>]*>([\s\S]*?)<\/t>/g)].map(x => x[1]).join('')
-          .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
-          .replace(/&quot;/g, '"').replace(/&#x27;/g, "'")
-      );
-    }
-
+  async function parseSheetXml(sheet, shared) {
     const grid = [];
     for (const rm of sheet.matchAll(/<row[^>]*>([\s\S]*?)<\/row>/g)) {
       const row = [];
@@ -169,7 +166,7 @@
         if (t && t[1] === 's' && vM) val = shared[+vM[1]] ?? null;
         else if (t && (t[1] === 'str' || t[1] === 'inlineStr')) {
           const im = /<t[^>]*>([\s\S]*?)<\/t>/.exec(inner);
-          val = im ? im[1] : (vM ? vM[1] : null);
+          val = im ? im[1].replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&') : (vM ? vM[1] : null);
         } else if (vM) val = Number(vM[1]);
         row[idx] = val;
       }
@@ -191,6 +188,169 @@
       return out;
     }).filter(r => r.some(v => v !== null));
     return { columns: head, rows };
+  }
+
+  async function parseXLSXAll(buf) {
+    const entries = readZip(buf);
+    let shared = [];
+    const sst = await readEntry(entries, 'xl/sharedStrings.xml');
+    if (sst) {
+      shared = [...sst.matchAll(/<si>([\s\S]*?)<\/si>/g)].map(m =>
+        [...m[1].matchAll(/<t[^>]*>([\s\S]*?)<\/t>/g)].map(x => x[1]).join('')
+          .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
+          .replace(/&quot;/g, '"').replace(/&#x27;/g, "'"));
+    }
+    let list = await xlsxSheets(entries);
+    if (!list.length) list = [{ name: 'Sheet1', path: 'xl/worksheets/sheet1.xml' }];
+    const sheets = [];
+    for (const sh of list) {
+      const path = sh.path || 'xl/worksheets/sheet1.xml';
+      const xml = await readEntry(entries, path);
+      if (!xml) { sheets.push({ name: sh.name, columns: [], rows: [], empty: true }); continue; }
+      const parsed = await parseSheetXml(xml, shared);
+      sheets.push({ name: sh.name, columns: parsed.columns, rows: parsed.rows, empty: !parsed.columns.length });
+    }
+    return sheets;
+  }
+
+  async function parseXLSX(buf) {
+    const sheets = await parseXLSXAll(buf);
+    const first = sheets.find(s2 => !s2.empty) || sheets[0] || { columns: [], rows: [] };
+    return { columns: first.columns, rows: first.rows, sheetName: first.name, sheetCount: sheets.length };
+  }
+
+  /* ---------------- 写 xlsx（零依赖，deflate-raw） ---------------- */
+  async function deflateRaw(bytes) {
+    const ds = new CompressionStream('deflate-raw');
+    const stream = new Blob([bytes]).stream().pipeThrough(ds);
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  }
+
+  function xmlEsc(v) {
+    return String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+  }
+
+  function colName(n) {
+    let s2 = '';
+    n += 1;
+    while (n > 0) { const r = (n - 1) % 26; s2 = String.fromCharCode(65 + r) + s2; n = Math.floor((n - 1) / 26); }
+    return s2;
+  }
+
+  /** 把表格写成 xlsx（单工作表）。返回 ArrayBuffer。 */
+  async function toXLSX(columns, rows, sheetName) {
+    const name = xmlEsc(sheetName || 'Sheet1');
+    const lines = [];
+    const header = columns.map((c, j) =>
+      `<c r="${colName(j)}1" t="inlineStr"><is><t>${xmlEsc(c)}</t></is></c>`).join('');
+    lines.push(`<row r="1">${header}</row>`);
+    rows.forEach((r, i) => {
+      const cells = r.map((v, j) => {
+        if (v === null || v === undefined || v === '') return '';
+        const ref = colName(j) + (i + 2);
+        if (typeof v === 'number' && Number.isFinite(v)) return `<c r="${ref}"><v>${v}</v></c>`;
+        return `<c r="${ref}" t="inlineStr"><is><t>${xmlEsc(v)}</t></is></c>`;
+      }).join('');
+      lines.push(`<row r="${i + 2}">${cells}</row>`);
+    });
+    const sheetXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${lines.join('')}</sheetData></worksheet>`;
+
+    const files = {
+      '[Content_Types].xml': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`,
+      '_rels/.rels': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`,
+      'xl/workbook.xml': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="${name}" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+      'xl/_rels/workbook.xml.rels': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`,
+      'xl/worksheets/sheet1.xml': sheetXml
+    };
+
+    // 手工拼 zip（store + deflate 均可，这里全用 deflate）
+    const enc = new TextEncoder();
+    const chunks = [];
+    const central = [];
+    let offset = 0;
+    const crcTable = (() => {
+      const t = new Uint32Array(256);
+      for (let i = 0; i < 256; i++) {
+        let c = i;
+        for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+        t[i] = c >>> 0;
+      }
+      return t;
+    })();
+    const crc32 = (u8) => {
+      let c = 0xFFFFFFFF;
+      for (let i = 0; i < u8.length; i++) c = crcTable[(c ^ u8[i]) & 0xFF] ^ (c >>> 8);
+      return (c ^ 0xFFFFFFFF) >>> 0;
+    };
+
+    for (const [fname, content] of Object.entries(files)) {
+      const raw = enc.encode(content);
+      const comp = await deflateRaw(raw);
+      const crc = crc32(raw);
+      const nameBytes = enc.encode(fname);
+      const now = new Date();
+      const dosTime = ((now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1)) & 0xFFFF;
+      const dosDate = (((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate()) & 0xFFFF;
+
+      const local = new Uint8Array(30 + nameBytes.length);
+      const dv = new DataView(local.buffer);
+      dv.setUint32(0, 0x04034b50, true);
+      dv.setUint16(4, 20, true);
+      dv.setUint16(6, 0, true);
+      dv.setUint16(8, 8, true);           // deflate
+      dv.setUint16(10, dosTime, true);
+      dv.setUint16(12, dosDate, true);
+      dv.setUint32(14, crc, true);
+      dv.setUint32(18, comp.length, true);
+      dv.setUint32(22, raw.length, true);
+      dv.setUint16(26, nameBytes.length, true);
+      dv.setUint16(28, 0, true);
+      local.set(nameBytes, 30);
+
+      chunks.push(local, comp);
+
+      const cen = new Uint8Array(46 + nameBytes.length);
+      const cv = new DataView(cen.buffer);
+      cv.setUint32(0, 0x02014b50, true);
+      cv.setUint16(4, 20, true);
+      cv.setUint16(6, 20, true);
+      cv.setUint16(8, 0, true);
+      cv.setUint16(10, 8, true);
+      cv.setUint16(12, dosTime, true);
+      cv.setUint16(14, dosDate, true);
+      cv.setUint32(16, crc, true);
+      cv.setUint32(20, comp.length, true);
+      cv.setUint32(24, raw.length, true);
+      cv.setUint16(28, nameBytes.length, true);
+      cv.setUint32(42, offset, true);
+      cen.set(nameBytes, 46);
+      central.push(cen);
+
+      offset += local.length + comp.length;
+    }
+
+    const cenSize = central.reduce((a, b) => a + b.length, 0);
+    const eocd = new Uint8Array(22);
+    const ev = new DataView(eocd.buffer);
+    ev.setUint32(0, 0x06054b50, true);
+    ev.setUint16(8, central.length, true);
+    ev.setUint16(10, central.length, true);
+    ev.setUint32(12, cenSize, true);
+    ev.setUint32(16, offset, true);
+
+    const total = chunks.reduce((a, b) => a + b.length, 0) + cenSize + 22;
+    const outBuf = new Uint8Array(total);
+    let pos = 0;
+    chunks.forEach(c => { outBuf.set(c, pos); pos += c.length; });
+    central.forEach(c => { outBuf.set(c, pos); pos += c.length; });
+    outBuf.set(eocd, pos);
+    return outBuf;
   }
 
   /* ---------------- 数据体检 ---------------- */
@@ -319,6 +479,72 @@
     return { codes, muMax, mu2 };
   }
 
+  /**
+   * 大样本校准：值域分 K 格预计算隶属度查找表。
+   * 复杂度从 O(n × levels × drops) 降到 O(K × levels × drops) + O(n)。
+   * 当格宽远小于云熵 En 时，误差可忽略（K=2000 时格宽约为 En 的 1/300）。
+   */
+  const LUT_MIN_N = 3000;     // 超过这个样本量走 LUT
+  const LUT_K = 2000;
+
+  function assignCodesLUT(values, clouds, levels, drops, seed) {
+    const n = values.length;
+    let min = Infinity, max = -Infinity, cnt = 0;
+    for (let i = 0; i < n; i++) {
+      const v = values[i];
+      if (!isNum(v)) continue;
+      if (v < min) min = v;
+      if (v > max) max = v;
+      cnt++;
+    }
+    if (!cnt) return { codes: new Array(n).fill(-1), muMax: new Array(n).fill(0), mu2: new Array(n).fill(0), lut: true };
+    if (!(max > min)) { min = min - 0.5; max = max + 0.5; }
+
+    const K = LUT_K;
+    const step = (max - min) / (K - 1);
+    const lut = new Float64Array(K * levels);
+    const r = rng(seed);
+    for (let k = 0; k < K; k++) {
+      const v = min + k * step;
+      for (let c = 0; c < levels; c++) {
+        const cl = clouds[c];
+        let acc = 0;
+        for (let d = 0; d < drops; d++) {
+          const en = cl.en + cl.he * gauss(r);
+          const e = Math.abs(en) < 1e-9 ? 1e-9 : en;
+          acc += Math.exp(-((v - cl.ex) ** 2) / (2 * e * e));
+        }
+        lut[k * levels + c] = acc / drops;
+      }
+    }
+
+    const codes = new Array(n).fill(-1);
+    const muMax = new Array(n).fill(0);
+    const mu2 = new Array(n).fill(0);
+    for (let i = 0; i < n; i++) {
+      const v = values[i];
+      if (!isNum(v)) continue;
+      let k = Math.round((v - min) / step);
+      if (k < 0) k = 0; else if (k >= K) k = K - 1;
+      let best = -1, bestK = 0, second = 0;
+      for (let c = 0; c < levels; c++) {
+        const mu = lut[k * levels + c];
+        if (mu > best) { second = best; best = mu; bestK = c; }
+        else if (mu > second) second = mu;
+      }
+      if (best <= 1e-12) {
+        let bestD = Infinity, kk = 0;
+        for (let c = 0; c < levels; c++) {
+          const d = Math.abs(v - clouds[c].ex);
+          if (d < bestD) { bestD = d; kk = c; }
+        }
+        bestK = kk; best = 0;
+      }
+      codes[i] = bestK; muMax[i] = best; mu2[i] = second;
+    }
+    return { codes, muMax, mu2, lut: true };
+  }
+
   function calibrate(values, opt) {
     const { lowPct = 25, highPct = 75, drops = 500, levels = 3, seed = 42 } = opt || {};
     const idx = [];
@@ -328,7 +554,8 @@
     const lo = quantile(sSorted, lowPct / 100);
     const hi = quantile(sSorted, highPct / 100);
     const { clouds } = buildClouds(lo, hi, levels);
-    const { codes: c0, muMax, mu2 } = assignCodes(vals, clouds, levels, drops, seed);
+    const assign = vals.length >= LUT_MIN_N ? assignCodesLUT : assignCodes;
+    const { codes: c0, muMax, mu2 } = assign(vals, clouds, levels, drops, seed);
 
     const codes = new Array(values.length).fill(-1);
     idx.forEach((src, i) => { codes[src] = c0[i]; });
@@ -1480,9 +1707,9 @@
   }
 
   global.DACCore = {
-    parseCSV, parseXLSX, profile, corrMatrix, calibrate, pearson, robustScale,
+    parseCSV, parseXLSX, parseXLSXAll, toXLSX, profile, corrMatrix, calibrate, pearson, robustScale,
     crossValidate, crossValidateStrict, leakageAudit, stratifiedFolds, evalMetrics,
-    calibrateWith, buildClouds, assignCodes, elbowCurve, robustness, nameScenarios,
+    calibrateWith, buildClouds, assignCodes, assignCodesLUT, LUT_MIN_N, elbowCurve, robustness, nameScenarios,
     bnLearn, bnInfer, bnSensitivity, toCSV,
     kmeans, silhouette, pca, cart, network, report,
     numericCols, isNum, mean, std, quantile, LEVEL_LABELS

@@ -124,7 +124,8 @@
     target: null, factors: [],
     params: { lowPct: 25, highPct: 75, drops: 500, levels: 3, k: 3, treeDepth: 3, netThreshold: 0.2, seed: 42 },
     res: null, extra: {}, tab: 'guide', step: 1, busy: false,
-    rowsWork: null, rowsRaw: null
+    rowsWork: null, rowsRaw: null,
+    roles: {}, sheets: null, sheetIdx: 0
   };
 
   /* 底部状态栏 */
@@ -193,8 +194,17 @@
       } else if (ext === 'xlsx' || ext === 'xls') {
         if (ext === 'xls') throw new Error('旧版 .xls 请另存为 .xlsx 或 .csv');
         const buf = await file.arrayBuffer();
-        parsed = await C.parseXLSX(buf);
+        const sheets = await C.parseXLSXAll(buf);
+        const usable = sheets.filter(sh => !sh.empty);
+        if (!usable.length) throw new Error('这个工作簿里没有可读的数据表');
+        S.sheets = usable;
+        S.sheetIdx = 0;
+        parsed = { columns: usable[0].columns, rows: usable[0].rows };
+        if (usable.length > 1) {
+          toast(`检测到 ${usable.length} 个工作表，可在下方切换`);
+        }
       } else throw new Error('只支持 .xlsx / .csv');
+      S.fileName = file.name;
       applyData(parsed, file.name);
     } catch (e) {
       $('#dsInfo').textContent = '解析失败';
@@ -234,6 +244,17 @@
     S.numeric = C.numericCols(S.columns, S.rows);
     if (S.numeric.length < 2) return toast('至少需要 2 个数值列', 5000);
 
+    // 初始化变量角色：最后一列 target，其余按类型自动判定
+    S.roles = {};
+    const lastIdx = S.columns.length - 1;
+    S.columns.forEach((c2, j) => {
+      const col = parsed.rows.map(r => r[j]);
+      const t = (window.DACPre ? window.DACPre.inferType(col, { name: c2 }) : 'num');
+      S.roles[c2] = (j === lastIdx) ? 'target'
+        : t === 'id' ? 'id'
+        : t === 'empty' ? 'exclude'
+        : (t === 'cat' || t === 'binary') ? 'cat' : 'num';
+    });
     const prof = C.profile(S.columns, S.rows);
     $('#dsInfo').innerHTML = `<b>${esc(name)}</b><br>${parsed.rows.length} 行 · ${parsed.columns.length} 列 · 数值列 ${S.numeric.length} 个`
       + (desc ? `<br><span class="muted">${desc}</span>` : '');
@@ -269,6 +290,110 @@
   }
   const pickedFactors = () => [...document.querySelectorAll('#factors input:checked')].map(i => i.value);
 
+
+  /* ---------------- 变量角色 / 工作表 ---------------- */
+  const ROLE_OPTS = [
+    ['target', '目标变量 y'], ['num', '数值型 x'], ['cat', '分类型 x'],
+    ['id', 'ID（不参与计算）'], ['weight', '权重'], ['group', '分组'],
+    ['time', '时间'], ['exclude', '排除']
+  ];
+
+  function openRolePanel() {
+    const back = el('div', {
+      style: 'position:fixed;inset:0;background:#000a;z-index:60;display:flex;align-items:center;justify-content:center;padding:20px'
+    });
+    const box = el('div', {
+      style: 'background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;max-width:720px;width:100%;max-height:86vh;overflow:auto'
+    });
+    box.appendChild(el('h3', { text: '变量角色', style: 'margin:0 0 4px;color:var(--acc)' }));
+    box.appendChild(el('div', { class: 'muted', style: 'margin-bottom:10px',
+      text: 'ID / 权重 / 分组 / 时间 / 排除 的列不参与建模。目标变量必须唯一。' }));
+
+    // 工作表切换
+    if (S.sheets && S.sheets.length > 1) {
+      const sel = el('select', {});
+      S.sheets.forEach((sh, i) => {
+        const o = el('option', { value: String(i), text: `${sh.name}（${sh.rows.length} 行）` });
+        if (i === S.sheetIdx) o.selected = true;
+        sel.appendChild(o);
+      });
+      sel.onchange = () => {
+        const i = +sel.value;
+        S.sheetIdx = i;
+        const sh = S.sheets[i];
+        back.remove();
+        applyData({ columns: sh.columns, rows: sh.rows }, `${S.fileName || '上传文件'} · ${sh.name}`);
+        toast('已切换到工作表：' + sh.name);
+      };
+      box.appendChild(el('div', { style: 'margin-bottom:12px' }, [
+        el('div', { class: 'muted', text: '工作表' }), sel
+      ]));
+    }
+
+    const tb = el('table');
+    tb.appendChild(el('thead', { html: '<tr><th>变量</th><th>角色</th><th>类型</th><th>缺失</th></tr>' }));
+    const body = el('tbody');
+    const prof = C.profile(S.columns, S.rows);
+    S.columns.forEach((c2, j) => {
+      const sel = el('select', { style: 'padding:4px 6px;font-size:12px' });
+      ROLE_OPTS.forEach(([v, label]) => {
+        const o = el('option', { value: v, text: label });
+        if (S.roles[c2] === v) o.selected = true;
+        sel.appendChild(o);
+      });
+      sel.onchange = () => {
+        if (sel.value === 'target') {
+          // 目标唯一
+          Object.keys(S.roles).forEach(k => { if (S.roles[k] === 'target') S.roles[k] = 'num'; });
+        }
+        S.roles[c2] = sel.value;
+        renderRoleTable();
+      };
+      const pc = prof.columns[j] || {};
+      body.appendChild(el('tr', { html:
+        `<td>${esc(c2)}</td><td></td>
+         <td><span class="pill ${pc.numeric ? 'ok' : 'warn'}">${pc.numeric ? '数值' : '文本'}</span></td>
+         <td>${pc.missing ?? 0}</td>` }));
+      body.lastChild.children[1].appendChild(sel);
+    });
+    tb.appendChild(body);
+    box.appendChild(tb);
+
+    const applyRoleTable = () => {
+      // 同步到分析用的 target / factors
+      const tgt = S.columns.find(c2 => S.roles[c2] === 'target');
+      if (tgt) $('#target').value = tgt;
+      renderFactors();
+      const usable = new Set(['num', 'cat']);
+      document.querySelectorAll('#factors input').forEach(inp => {
+        inp.checked = usable.has(S.roles[inp.value]);
+      });
+    };
+    function renderRoleTable() { /* 简化：不做整表重绘，直接同步 */ applyRoleTable(); }
+
+    const row = el('div', { style: 'display:flex;gap:8px;margin-top:14px;justify-content:flex-end' });
+    const bReset = el('button', { class: 'ghost', text: '按类型重新识别' });
+    bReset.onclick = () => {
+      const lastIdx = S.columns.length - 1;
+      S.columns.forEach((c2, j) => {
+        const col = S.rows.map(r => r[j]);
+        const t = (window.DACPre ? window.DACPre.inferType(col, { name: c2 }) : 'num');
+        S.roles[c2] = (j === lastIdx) ? 'target' : t === 'id' ? 'id' : t === 'empty' ? 'exclude'
+          : (t === 'cat' || t === 'binary') ? 'cat' : 'num';
+      });
+      back.remove();
+      openRolePanel();
+    };
+    const bOk = el('button', { text: '应用并关闭' });
+    bOk.onclick = () => { applyRoleTable(); back.remove(); toast('变量角色已应用'); };
+    row.appendChild(bReset); row.appendChild(bOk);
+    box.appendChild(row);
+
+    back.appendChild(box);
+    back.onclick = e => { if (e.target === back) back.remove(); };
+    document.body.appendChild(back);
+  }
+
   /* ---------------- 参数 ---------------- */
   const bind = (id, out, fmtFn) => {
     const s = $('#' + id);
@@ -295,6 +420,10 @@
   }
 
   /* ---------------- 运行 ---------------- */
+  document.addEventListener('click', e => {
+    if (e.target && e.target.id === 'btnRoles') openRolePanel();
+  });
+
   $('#next2').onclick = () => {
     if (pickedFactors().length === 0) return toast('至少选一个条件变量');
     setStep(3); setTab('calib'); run();
@@ -1798,6 +1927,38 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
       });
       download(`DAC校准数据_${stamp()}.csv`, '\ufeff' + C.toCSV(head, rows), 'text/csv');
     };
+    const bX = el('button', { class: 'ghost mini', text: '导出 Excel（xlsx）' });
+    bX.onclick = async () => {
+      try {
+        const r2 = S.res;
+        const idxT = S.columns.indexOf(r2.meta.target);
+        const idxF = r2.meta.factors.map(f => S.columns.indexOf(f));
+        const keep = S.rows.filter(x => C.isNum(x[idxT]) && idxF.every(j => C.isNum(x[j])));
+        const L2 = r2.calibration.labels;
+        const head = ['样本', ...r2.meta.factors.map(f => f + '_等级'), r2.meta.target + '_等级'];
+        const rows = keep.map((x, i) => {
+          const codes = r2.meta.factors.map(f => r2.calibration.factors[f].codes[i])
+            .concat([r2.calibration.target.codes[i]]);
+          return [i + 1, ...codes.map(c => L2[c] ?? c)];
+        });
+        const buf = await C.toXLSX(head, rows, 'DAC校准数据');
+        const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+        const a = el('a', { href: URL.createObjectURL(blob), download: `DAC校准数据_${stamp()}.xlsx` });
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+        toast('Excel 已生成');
+      } catch (e) { toast('导出失败：' + e.message, 5000); }
+    };
+    const bP1 = el('button', { class: 'ghost mini', text: '导出项目 JSON' });
+    bP1.onclick = () => exportProject(false);
+    const bP2 = el('button', { class: 'ghost mini', text: '导出项目（含数据）' });
+    bP2.onclick = () => exportProject(true);
+    const bP3 = el('button', { class: 'ghost mini', text: '导入项目' });
+    bP3.onclick = () => {
+      const inp = el('input', { type: 'file', accept: '.json' });
+      inp.onchange = () => { if (inp.files[0]) importProjectFile(inp.files[0]); };
+      inp.click();
+    };
     const b5 = el('button', { class: 'ghost mini', text: '复制参数快照' });
     b5.onclick = () => {
       const p2 = S.res.meta.params;
@@ -1805,11 +1966,110 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
       if (navigator.clipboard) navigator.clipboard.writeText(txt).then(() => toast('参数已复制，可直接粘进论文方法部分'));
       else { download('params.json', txt, 'application/json'); }
     };
-    bar.appendChild(b1); bar.appendChild(b2); bar.appendChild(b3); bar.appendChild(b4); bar.appendChild(b5);
+    bar.appendChild(b1); bar.appendChild(b2); bar.appendChild(b3); bar.appendChild(b4); bar.appendChild(bX);
+    bar.appendChild(bP1); bar.appendChild(bP2); bar.appendChild(bP3); bar.appendChild(b5);
     pane.appendChild(bar);
     pane.appendChild(el('div', { class: 'muted', html:
       `参数快照：分位 ${r.meta.params.lowPct}/${r.meta.params.highPct} · 云滴 ${r.meta.params.drops} · 等级 ${r.meta.params.levels} · k=${r.meta.params.k} · 深度 ${r.meta.params.treeDepth} · 阈值 ${r.meta.params.netThreshold} · 种子 ${r.meta.params.seed}` }));
     pane.appendChild(el('pre', { text: r.report }));
+  }
+
+  /* ---------------- 项目管理（版本化 JSON） ---------------- */
+  const PROJ_VERSION = 'dac-project/2.6';
+
+  function projectSnapshot(includeData) {
+    const r = S.res;
+    return {
+      format: PROJ_VERSION,
+      name: (S.projectName || '未命名项目'),
+      createdAt: new Date().toISOString(),
+      app: { name: 'DAC Workbench', version: '2.6', algo: 'v2.1+' },
+      dataset: {
+        name: S.fileName || (S.sheets ? S.sheets[S.sheetIdx].name : '内置示例'),
+        rows: S.rows.length, cols: S.columns.length,
+        columns: S.columns.slice(),
+        // 默认不打包原始数据，避免项目文件失控膨胀与隐私外泄
+        data: includeData ? S.rowsRaw || S.rows : null,
+        hash: (() => {
+          const str = JSON.stringify(S.columns) + '|' + S.rows.length + '|' +
+            (S.rows[0] ? JSON.stringify(S.rows[0]) : '');
+          let h = 5381;
+          for (let i = 0; i < str.length; i++) h = ((h * 33) ^ str.charCodeAt(i)) >>> 0;
+          return 'h' + h.toString(16);
+        })()
+      },
+      roles: S.roles,
+      selections: { target: S.target, factors: S.factors },
+      params: S.params,
+      results: r ? {
+        usedRows: r.meta.usedRows,
+        silhouette: r.scenarios.silhouette,
+        accuracy: r.tree.accuracy,
+        cv: r.tree.cv ? { mean: r.tree.cv.mean, std: r.tree.cv.std, k: r.tree.cv.k } : null,
+        importances: r.tree.importances.slice(0, 8),
+        rules: r.tree.rules.slice(0, 12),
+        edges: r.net.edges.slice(0, 30),
+        bnEdges: r.bn ? r.bn.edges : null,
+        sens: (r.sens || []).map(({ f, rows }) => ({
+          var: f, probs: rows.map(x => +(x.posterior ? x.posterior[x.posterior.length - 1] * 100 : 0).toFixed(1))
+        }))
+      } : null
+    };
+  }
+
+  function exportProject(includeData) {
+    const proj = projectSnapshot(includeData);
+    const name = (proj.name || 'project').replace(/[\\/:*?"<>|]/g, '_');
+    download(`DAC项目_${name}_${stamp()}.json`, JSON.stringify(proj, null, 2), 'application/json');
+    toast(includeData ? '已导出（含数据）' : '已导出（不含原始数据，仅参数与结果）', 4000);
+  }
+
+  function importProjectFile(file) {
+    file.text().then(txt => {
+      let proj;
+      try { proj = JSON.parse(txt); } catch (e) { throw new Error('不是合法 JSON'); }
+      if (!proj.format || !String(proj.format).startsWith('dac-project/')) {
+        throw new Error('不是 DAC 项目文件（缺少 format 标识）');
+      }
+      const [major] = String(proj.format).split('/');
+      if (!proj.format.startsWith('dac-project/2.')) {
+        throw new Error('项目版本不兼容：' + proj.format + '（当前支持 2.x）');
+      }
+      // 恢复
+      if (proj.dataset && Array.isArray(proj.dataset.data)) {
+        S.columns = proj.dataset.columns.slice();
+        S.rows = proj.dataset.data.map(r => r.slice());
+        S.rowsRaw = S.rows.map(r => r.slice());
+        S.numeric = C.numericCols(S.columns, S.rows);
+        toast('已恢复数据（' + S.rows.length + ' 行）');
+      } else if (proj.dataset && Array.isArray(proj.dataset.columns)) {
+        if (!S.columns.length) {
+          toast('项目未含数据；请先导入同名列的数据集，再应用参数', 6000);
+        }
+      }
+      if (proj.roles) S.roles = Object.assign({}, proj.roles);
+      if (proj.selections) {
+        if (proj.selections.target) S.target = proj.selections.target;
+        if (Array.isArray(proj.selections.factors)) S.factors = proj.selections.factors.slice();
+      }
+      if (proj.params) {
+        const pp = proj.params;
+        if (pp.lowPct) { $('#low').value = pp.lowPct; $('#vLow').textContent = pp.lowPct + '%'; }
+        if (pp.highPct) { $('#high').value = pp.highPct; $('#vHigh').textContent = pp.highPct + '%'; }
+        if (pp.drops) { $('#drops').value = pp.drops; $('#vDrops').textContent = pp.drops; }
+        if (pp.levels) { $('#levels').value = pp.levels; $('#vLevels').textContent = pp.levels; }
+        if (pp.k) { $('#k').value = pp.k; $('#vK').textContent = pp.k; }
+        if (pp.treeDepth) { $('#depth').value = pp.treeDepth; $('#vDepth').textContent = pp.treeDepth; }
+        if (pp.netThreshold) { $('#net').value = Math.round(pp.netThreshold * 100); $('#vNet').textContent = pp.netThreshold.toFixed(2); }
+        if (pp.seed) $('#seed').value = pp.seed;
+      }
+      S.projectName = proj.name || S.projectName;
+      S.extra = {};
+      setStep(4);
+      setTab('profile');
+      if (S.rows.length && S.target) run();
+      toast('项目已导入：' + (proj.name || '未命名'), 5000);
+    }).catch(e => toast('导入失败：' + e.message, 6000));
   }
 
   function download(name, content, type) {

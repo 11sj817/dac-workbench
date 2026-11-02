@@ -26,16 +26,24 @@
 2. **构建期 `</script>` 提前闭合** → 整页 JS 失效、`__DATASETS__` 未定义
 3. **离散化逐单元格调用** → 400 行严格 CV 超 80 秒
 
-## 未完成（诚实披露）
+## V2.6.1 补齐
+
+| 项 | 实现 |
+|---|---|
+| 多工作表选择 | `parseXLSXAll` + 角色弹层里的工作表下拉 |
+| 变量角色系统 | 8 种角色（target/num/cat/id/weight/group/time/exclude），自动识别 + 手动改，目标唯一约束 |
+| 项目管理 | 版本化 JSON（`dac-project/2.6`），导出/含数据导出/导入，校验 format 与版本 |
+| Excel 导出 | 零依赖 `toXLSX`（deflate-raw + 手写 zip） |
+| 10 万行压测 | 完成，暴露校准 29s 并优化到 1s |
+
+## 仍未完成（诚实披露）
 
 | 项 | 原因 |
 |---|---|
-| 多工作表选择 | 需要 SheetJS 或更大体积的 xlsx 解析，本轮未做 |
-| 变量角色系统（ID/权重/时间/分组） | UI 未做，引擎有 `types` 基础 |
-| 项目管理（JSON 导入导出） | 未实现 |
-| 报告中心多格式（PDF/Excel） | 仍只有 Markdown/JSON/CSV/打印 |
-| 跨浏览器测试 | 仅 Chrome 156 |
-| 10 万行压测 | 未做 |
+| Firefox / Safari 实机测试 | 环境只有 Chrome 156 |
+| xlsx 解析单元测试 | 依赖浏览器 `DecompressionStream`，Node 无此 API |
+| 跨项目历史版本管理 | 只做了单项目快照，没做多版本树 |
+| 变量角色与统计模型的联动 | 角色影响变量筛选，但 weight/group 尚未接入加权与分层估计 |
 
 ## 版本号说明
 
