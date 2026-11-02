@@ -639,6 +639,7 @@
       case 'net': return renderNet();
       case 'bn': return renderBN();
       case 'robust': return renderRobust();
+      case 'boot': return renderBootstrap();
       case 'ai': return renderAI();
       case 'report': return renderReport();
     }
@@ -1607,6 +1608,311 @@
       text: '这就是审稿人最常问的那句“换个参数结论还成立吗”，现在一键就能回答。' }));
   }
 
+
+
+  /* ---------------- Bootstrap 稳定性实验室 ---------------- */
+  function bootState() {
+    if (!S.extra.boot) {
+      S.extra.boot = {
+        task: 'cluster', B: 200, seed: 42, method: 'iid', fraction: 1, replacement: true,
+        k: 3, maxDepth: 3, threshold: 0.6, result: null, diag: null, error: null, busy: false
+      };
+    }
+    return S.extra.boot;
+  }
+
+  function renderBootstrap() {
+    const pane = $('#pane');
+    const BS = window.DACBootstrap;
+    pane.innerHTML = '';
+    if (!BS) { pane.innerHTML = '<div class="muted">Bootstrap 引擎未加载。</div>'; return; }
+    if (!S.rows.length) { pane.innerHTML = '<div class="muted">先导入数据。</div>'; return; }
+    const q = bootState();
+
+    /* 说明 */
+    pane.appendChild(el('div', { class: 'muted', html:
+      'Bootstrap 用重复重采样估计<b>结构稳定性</b>，回答的是「换个样本，结论还一样吗」。' +
+      '它<b>不是</b>准确率，也<b>不是</b>因果证据。' }));
+
+    /* 实验设置 */
+    const grid = el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap;margin:12px 0' });
+
+    const selTask = el('select', {});
+    [['cluster', 'KMeans 聚类稳定性'], ['rules', 'CART 规则稳定性'], ['bn', '贝叶斯网络结构稳定性']]
+      .forEach(([v, l]) => { const o = el('option', { value: v, text: l }); if (q.task === v) o.selected = true; selTask.appendChild(o); });
+    selTask.onchange = () => { q.task = selTask.value; q.result = null; renderBootstrap(); };
+
+    const selMethod = el('select', {});
+    [['iid', '行级 IID（默认）'], ['group', '分组 Cluster（整组抽）'],
+     ['stratified', '分层 Stratified'], ['weighted', '加权 Weighted']]
+      .forEach(([v, l]) => { const o = el('option', { value: v, text: l }); if (q.method === v) o.selected = true; selMethod.appendChild(o); });
+    selMethod.onchange = () => { q.method = selMethod.value; };
+
+    const inB = el('input', { type: 'number', value: q.B, min: '10', max: '2000', step: '10' });
+    inB.onchange = () => { q.B = Math.max(10, Math.min(2000, +inB.value || 200)); };
+    const inSeed = el('input', { type: 'number', value: q.seed });
+    inSeed.onchange = () => { q.seed = +inSeed.value || 42; };
+    const inK = el('input', { type: 'number', value: q.k, min: '2', max: '8' });
+    inK.onchange = () => { q.k = Math.max(2, +inK.value || 3); };
+    const inFrac = el('input', { type: 'number', value: q.fraction, min: '0.1', max: '1', step: '0.1' });
+    inFrac.onchange = () => { q.fraction = Math.max(0.1, Math.min(1, +inFrac.value || 1)); };
+    const inThr = el('input', { type: 'number', value: q.threshold, min: '0.1', max: '1', step: '0.05' });
+    inThr.onchange = () => { q.threshold = Math.max(0.1, Math.min(1, +inThr.value || 0.6)); };
+
+    const cell = (label, node, w) => el('div', { style: 'width:' + (w || 130) + 'px' },
+      [el('div', { class: 'muted', text: label }), node]);
+    grid.appendChild(cell('任务', selTask, 210));
+    grid.appendChild(cell('抽样方法', selMethod, 190));
+    grid.appendChild(cell('重采样次数 B', inB, 120));
+    grid.appendChild(cell('随机种子', inSeed, 100));
+    if (q.task === 'cluster') grid.appendChild(cell('聚类数 k', inK, 90));
+    if (q.task === 'bn') grid.appendChild(cell('边频率阈值', inThr, 100));
+    grid.appendChild(cell('抽样比例', inFrac, 100));
+    pane.appendChild(grid);
+
+    /* 分组/权重提示 */
+    const gCol = S.columns.find(c => S.roles[c] === 'group');
+    const wCol = S.columns.find(c => S.roles[c] === 'weight');
+    if ((q.method === 'group' && !gCol) || (q.method === 'weighted' && !wCol)) {
+      pane.appendChild(el('div', { class: 'hint', style: 'border-color:#5a4a1a;color:#f5c66b',
+        text: q.method === 'group'
+          ? '还没指定分组列。请到「变量角色」把某一列设为「分组」，否则会退化为行级抽样。'
+          : '还没指定权重列。请到「变量角色」把某一列设为「权重」。' }));
+    }
+    pane.appendChild(el('div', { class: 'muted', html:
+      `当前：${gCol ? '分组列 = <b>' + esc(gCol) + '</b>' : '无分组列'}；` +
+      `${wCol ? '权重列 = <b>' + esc(wCol) + '</b>' : '无权重列'}` }));
+
+    /* 运行 */
+    const runRow = el('div', { style: 'display:flex;gap:8px;margin:14px 0;align-items:center' });
+    const btnRun = el('button', { class: 'mini', text: '开始 Bootstrap 实验' });
+    const bar = el('div', { class: 'bar', style: 'width:200px;display:none' }, [el('i', { style: 'width:0%' })]);
+    btnRun.onclick = async () => {
+      btnRun.disabled = true;
+      bar.style.display = '';
+      q.error = null;
+      setBusy(true, 'Bootstrap 计算中…');
+      try {
+        const task = S.target || S.columns[S.columns.length - 1];
+        const idxT = S.columns.indexOf(task);
+        // 注意：不要用 map 的形参在 filter 里引用（作用域已结束，会 ReferenceError）
+        const factorIdx = S.columns.map((_, j) => j).filter(j => {
+          const nm = S.columns[j];
+          return j !== idxT && S.roles[nm] !== 'id' && S.roles[nm] !== 'exclude' && S.numeric.includes(nm);
+        });
+        if (!factorIdx.length) throw new Error('没有可用的数值型条件变量');
+        const data = {
+          X: S.rows.map(r => factorIdx.map(j => r[j])),
+          y: S.rows.map(r => r[idxT]),
+          names: factorIdx.map(j => S.columns[j]),
+          labels: C.LEVEL_LABELS[S.params.levels || 3],
+          yName: task,
+          groups: gCol ? S.rows.map(r => r[S.columns.indexOf(gCol)]) : null,
+          weights: wCol ? S.rows.map(r => r[S.columns.indexOf(wCol)]) : null
+        };
+        const opt = {
+          task: q.task, B: q.B, seed: q.seed, method: q.method, fraction: q.fraction,
+          replacement: q.replacement, k: q.k, maxDepth: q.maxDepth,
+          levels: S.params.levels || 3, drops: Math.min(200, S.params.drops || 200),
+          bnThreshold: q.threshold, impute: 'median'
+        };
+        let res;
+        try {
+          res = await WK.run('bootstrapStability', { data, opt }, {
+            onProgress: p2 => { bar.querySelector('i').style.width = p2 + '%'; setBusy(true, 'Bootstrap ' + p2 + '%'); },
+            timeoutMs: 600000
+          });
+        } catch (e) {
+          if (e.message !== 'NO_WORKER') throw e;
+          res = window.DACBootstrap.run(data, opt, p2 => { bar.querySelector('i').style.width = p2 + '%'; });
+        }
+        q.result = res;
+        q.diag = window.DACBootstrap.diagnose(res);
+      } catch (e) {
+        q.error = e.message;
+      }
+      bar.style.display = 'none';
+      setBusy(false, '就绪');
+      btnRun.disabled = false;
+      renderBootstrap();
+    };
+    runRow.appendChild(btnRun);
+    runRow.appendChild(bar);
+    if (q.result) runRow.appendChild(el('span', { class: 'chip',
+      text: `上次：${q.result.okCount}/${q.result.B} 次成功 · ${(q.result.elapsedMs / 1000).toFixed(1)}s` }));
+    pane.appendChild(runRow);
+
+    if (q.error) {
+      pane.appendChild(el('div', { class: 'hint', style: 'border-color:#5a2020;color:#fca5a5', text: '失败：' + q.error }));
+      return;
+    }
+    if (!q.result) {
+      pane.appendChild(el('div', { class: 'hint', html:
+        '建议：先跑 <b>B=100</b> 看大概，正式结论用 <b>B=500</b>。' +
+        '聚类稳定性看 ARI（≥0.75 稳定）；规则稳定性看频率（≥50% 才算常见）；' +
+        '网络稳定性看边频率（但方向频繁翻转说明结构不可信）。' }));
+      return;
+    }
+
+    /* 诊断 */
+    const dg = q.diag;
+    pane.appendChild(el('h3', { text: '稳定性诊断', style: 'margin-top:18px' }));
+    pane.appendChild(el('div', { class: 'rule', style:
+      'border-left-color:' + (dg.ok ? '#34d399' : '#f59e0b') + ';cursor:default',
+      html: `<span class="pill ${dg.ok ? 'ok' : 'warn'}">${dg.ok ? '结构稳定' : '存在不稳定项'}</span>` }));
+    const tbd = el('table');
+    tbd.appendChild(el('thead', { html: '<tr><th>检查</th><th>状态</th><th>依据</th></tr>' }));
+    const bd = el('tbody');
+    dg.items.forEach(it => {
+      const cls = it.status === 'PASS' ? 'ok' : it.status === 'FAIL' ? 'bad' : it.status === 'WARNING' ? 'warn' : 'info';
+      bd.appendChild(el('tr', { html:
+        `<td>${esc(it.name)}</td><td><span class="pill ${cls}">${it.status}</span></td>
+         <td style="text-align:left" class="muted">${esc(it.detail)}</td>` }));
+    });
+    tbd.appendChild(bd);
+    pane.appendChild(tbd);
+
+    const sum = q.result.summary;
+
+    /* ---- 聚类 ---- */
+    if (sum.cluster) {
+      const c = sum.cluster;
+      pane.appendChild(el('h3', { text: '聚类结构稳定性', style: 'margin-top:20px' }));
+      pane.appendChild(el('div', { class: 'stat' }, [
+        el('div', { html: `<span>平均 ARI</span><b>${c.ari.mean.toFixed(3)}</b>` }),
+        el('div', { html: `<span>ARI 95% 区间</span><b>${c.ari.p05.toFixed(3)} ~ ${c.ari.p95.toFixed(3)}</b>` }),
+        el('div', { html: `<span>平均 NMI</span><b>${c.nmi.mean.toFixed(3)}</b>` }),
+        el('div', { html: `<span>空簇出现率</span><b>${(c.emptyRate * 100).toFixed(1)}%</b>` })
+      ]));
+
+      // ARI 直方图
+      const vals = c.ari.values;
+      if (vals.length > 1) {
+        const bins = 20, W = 660, H = 150, pad = 28;
+        const min = Math.min(...vals, -0.2), max = Math.max(...vals, 1);
+        const counts = new Array(bins).fill(0);
+        vals.forEach(v => {
+          const k = Math.min(bins - 1, Math.max(0, Math.floor((v - min) / (max - min || 1) * bins)));
+          counts[k]++;
+        });
+        const maxC = Math.max(...counts);
+        const g = mkSvg(W, H);
+        g.appendChild(mkLine(pad, H - pad, W - pad, H - pad, '#22313f'));
+        counts.forEach((cnt, i) => {
+          const bw = (W - pad * 2) / bins;
+          const bh = (cnt / maxC) * (H - pad * 2);
+          g.appendChild(mkRect(pad + i * bw + 1, H - pad - bh, bw - 2, bh, '#4c9aff'));
+        });
+        g.appendChild(mkText(pad, H - 8, min.toFixed(2), '#8aa0b4', 10, 'start'));
+        g.appendChild(mkText(W - pad, H - 8, max.toFixed(2), '#8aa0b4', 10, 'end'));
+        g.appendChild(mkText(W / 2, 14, `ARI 分布（${vals.length} 对）`, '#8aa0b4', 11, 'middle'));
+        pane.appendChild(g);
+      }
+
+      // 共聚类热力图（采样）
+      const n = q.result.n;
+      const step = Math.max(1, Math.ceil(n / 60));
+      const side = Math.ceil(n / step);
+      const cellPx = Math.max(2, Math.floor(360 / side));
+      const cv = document.createElement('canvas');
+      cv.width = side * cellPx; cv.height = side * cellPx;
+      const ctx = cv.getContext('2d');
+      const co = c.coCluster.matrix;
+      for (let a = 0; a < side; a++) {
+        for (let bb = 0; bb < side; bb++) {
+          const i = a * step, j = bb * step;
+          const v = co[i * n + j];
+          let col = '#16222e';
+          if (!Number.isNaN(v)) {
+            const t2 = Math.max(0, Math.min(1, v));
+            col = `rgb(${Math.round(20 + t2 * 40)},${Math.round(40 + t2 * 180)},${Math.round(60 + t2 * 195)})`;
+          }
+          ctx.fillStyle = col;
+          ctx.fillRect(bb * cellPx, a * cellPx, cellPx, cellPx);
+        }
+      }
+      pane.appendChild(el('h3', { text: '共聚类矩阵（越亮 = 越常被分到同簇）', style: 'margin-top:16px' }));
+      const wrap = el('div', { style: 'overflow:auto;max-width:100%' });
+      wrap.appendChild(cv);
+      pane.appendChild(wrap);
+      pane.appendChild(el('div', { class: 'muted', style: 'margin-top:6px',
+        text: '暗块表示「从未共同参与评价」的样本对（分母为 0），不等于「不同簇」。' }));
+
+      // 样本稳定性排名
+      const stab = c.stability.map((v, i) => ({ i, v })).filter(x => Number.isFinite(x.v))
+        .sort((a2, b2) => b2.v - a2.v);
+      if (stab.length) {
+        const t2 = el('table');
+        t2.appendChild(el('thead', { html: '<tr><th>排名</th><th>样本序号</th><th>同簇稳定性</th></tr>' }));
+        const b2 = el('tbody');
+        stab.slice(0, 8).concat(stab.slice(-8)).forEach((x, k) => {
+          const rank = k < 8 ? k + 1 : stab.length - (16 - k) + 1;
+          b2.appendChild(el('tr', { html:
+            `<td>${rank}</td><td>#${x.i + 1}</td><td>${x.v.toFixed(3)}</td>` }));
+        });
+        t2.appendChild(b2);
+        pane.appendChild(el('h3', { text: '样本层面：最稳 / 最不稳', style: 'margin-top:16px' }));
+        pane.appendChild(t2);
+      }
+    }
+
+    /* ---- 规则 ---- */
+    if (sum.rules) {
+      const r2 = sum.rules;
+      pane.appendChild(el('h3', { text: 'CART 规则稳定性', style: 'margin-top:20px' }));
+      pane.appendChild(el('div', { class: 'stat' }, [
+        el('div', { html: `<span>不同规则数</span><b>${r2.ruleCount}</b>` }),
+        el('div', { html: `<span>≥50% 出现</span><b>${r2.stableRules}</b>` }),
+        el('div', { html: `<span>训练准确率均值</span><b>${(r2.accuracyMean * 100).toFixed(1)}%</b>` }),
+        el('div', { html: `<span>根节点变量数</span><b>${r2.rootVar.length}</b>` })
+      ]));
+      const t3 = el('table');
+      t3.appendChild(el('thead', { html: '<tr><th>规则</th><th>出现次数</th><th>频率</th></tr>' }));
+      const b3 = el('tbody');
+      r2.rules.slice(0, 15).forEach(x => b3.appendChild(el('tr', { html:
+        `<td style="text-align:left"><code>${esc(x.sig)}</code></td><td>${x.count}</td>
+         <td><div class="bar" style="width:80px;display:inline-block"><i style="width:${Math.round(x.freq * 100)}%"></i></div> ${(x.freq * 100).toFixed(1)}%</td>` })));
+      t3.appendChild(b3);
+      pane.appendChild(t3);
+      const t4 = el('table');
+      t4.appendChild(el('thead', { html: '<tr><th>根节点变量</th><th>频率</th></tr>' }));
+      const b4 = el('tbody');
+      r2.rootVar.forEach(x => b4.appendChild(el('tr', { html: `<td>${esc(x.name)}</td><td>${(x.freq * 100).toFixed(1)}%</td>` })));
+      t4.appendChild(b4);
+      pane.appendChild(el('h3', { text: '根节点变量频率（最能解释目标的分裂）', style: 'margin-top:16px' }));
+      pane.appendChild(t4);
+    }
+
+    /* ---- 网络 ---- */
+    if (sum.bn) {
+      const bn = sum.bn;
+      pane.appendChild(el('h3', { text: '贝叶斯网络结构稳定性', style: 'margin-top:20px' }));
+      pane.appendChild(el('div', { class: 'stat' }, [
+        el('div', { html: `<span>成功学习次数</span><b>${bn.okCount}</b>` }),
+        el('div', { html: `<span>候选边</span><b>${bn.edges.length}</b>` }),
+        el('div', { html: `<span>方向不稳定</span><b>${bn.unstable}</b>` }),
+        el('div', { html: `<span>共识边</span><b>${bn.consensus.edges.length}</b>` })
+      ]));
+      const t5 = el('table');
+      t5.appendChild(el('thead', { html: '<tr><th>边</th><th>正向频率</th><th>反向频率</th><th>判读</th></tr>' }));
+      const b5 = el('tbody');
+      bn.topEdges.forEach(e => {
+        const dir = e.freq > 0.1 && e.revFreq > 0.1;
+        b5.appendChild(el('tr', { html:
+          `<td>${esc(e.from)} → ${esc(e.to)}</td><td>${(e.freq * 100).toFixed(1)}%</td>
+           <td>${(e.revFreq * 100).toFixed(1)}%</td>
+           <td>${dir ? '<span class="pill warn">方向不稳</span>' : '<span class="pill ok">方向稳定</span>'}</td>` }));
+      });
+      t5.appendChild(b5);
+      pane.appendChild(t5);
+      if (bn.consensus.dropped > 0) {
+        pane.appendChild(el('div', { class: 'hint', style: 'border-color:#5a4a1a;color:#f5c66b',
+          text: `共识网络构建时有 ${bn.consensus.dropped} 条高频边因会形成有向环而被丢弃——这正说明该结构在重采样下不稳定。` }));
+      }
+      pane.appendChild(el('div', { class: 'rule', style: 'margin-top:12px;border-left-color:#f59e0b;cursor:default',
+        html: '<b>解释边界</b>：边频率只表示「这个结构在重采样中多常被选中」，<b>不代表因果成立的概率</b>。' }));
+    }
+  }
 
   /* ---------------- AI 助手（可选 API 接入） ---------------- */
   const AI_KEY = 'dac-workbench-ai';

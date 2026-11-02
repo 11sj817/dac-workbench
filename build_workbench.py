@@ -11,6 +11,7 @@ html = (WB / "index.html").read_text(encoding="utf-8")
 core = (WB / "core.js").read_text(encoding="utf-8")
 pre = (WB / "preprocess.js").read_text(encoding="utf-8")
 workerk = (WB / "worker.js").read_text(encoding="utf-8")
+boot = (WB / "bootstrap.js").read_text(encoding="utf-8")
 ui = (WB / "ui.js").read_text(encoding="utf-8")
 samples = (ROOT / "data" / "samples.js").read_text(encoding="utf-8")
 
@@ -18,10 +19,11 @@ bundle = (
     "<script>\n" + samples + "\n</script>\n"
     "<script>\n" + pre + "\n</script>\n"
     "<script>\n" + core + "\n</script>\n"
+    "<script>\n" + boot + "\n</script>\n"
     "<script>\n" + ui + "\n</script>\n"
 )
 
-worker_src = "self.window = self;\n" + pre + "\n" + core + "\n" + workerk
+worker_src = "self.window = self;\n" + pre + "\n" + core + "\n" + boot + "\n" + workerk
 # JS 字符串里把 </ 转成 <\/ ，避免提前闭合外层 <script>
 js_literal = json.dumps(worker_src).replace("</", "<\\/")
 html = html.replace("<!--CORE-->\n<!--UI-->",
