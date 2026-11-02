@@ -1112,6 +1112,65 @@
     return folds;
   }
 
+  /* ---------------- 目标变量类型识别 ---------------- */
+  /**
+   * 判断决策变量是连续 / 二分类 / 多分类 / 计数。
+   * 规则（可被 UI 手动覆盖）：
+   *  - 字符串型 → 二分类或分类
+   *  - 数值型但只有 2 个不同取值 → 二分类（**不做云模型校准**）
+   *  - 整数型且不同取值很少 → 分类
+   *  - 非负整数且方差明显大于均值 → 疑似计数
+   *  - 其余 → 连续
+   */
+  function detectTargetType(values, opt) {
+    const o = opt || {};
+    const clean = values.filter(v => !(v === null || v === undefined ||
+      (typeof v === 'number' && !Number.isFinite(v)) || (typeof v === 'string' && v.trim() === '')));
+    if (!clean.length) return { type: 'unknown', levels: [], reason: '没有有效取值', n: 0 };
+
+    const n = clean.length;
+    const numCount = clean.filter(v => typeof v === 'number').length;
+    const isNum = numCount === n;
+    const uniq = [...new Set(clean)];
+
+    if (!isNum) {
+      const lv = uniq.slice().sort();
+      return {
+        type: lv.length === 2 ? 'binary' : 'categorical',
+        levels: lv, n,
+        reason: `含非数值（${n - numCount} 条），${lv.length} 个不同取值 → ${lv.length === 2 ? '二分类' : '多分类'}`
+      };
+    }
+
+    if (uniq.length === 2) {
+      const lv = uniq.slice().sort((a, b) => a - b);
+      return { type: 'binary', levels: lv, n,
+        reason: `数值型但只有 2 个不同取值（${lv[0]} / ${lv[1]}）→ 按二分类处理，不做分位数校准` };
+    }
+
+    const allInt = clean.every(v => Number.isInteger(v));
+    // 小样本时 floor(n*0.05) 会退化到 0，改用"取值数 ≤ 10 且不超过样本数一半"
+    // 判据：整数 + 取值数 ≤ 10 + 取值数不超过样本数一半（避免 1 样本 1 值）
+    const MAX_LEVELS = 10;
+    if (allInt && uniq.length <= MAX_LEVELS && uniq.length <= n * 0.5) {
+      const lv = uniq.slice().sort((a, b) => a - b);
+      return { type: 'categorical', levels: lv, n,
+        reason: `全为整数且只有 ${lv.length} 个取值（≤${MAX_LEVELS}，且不超过样本数一半）→ 按有序分类处理` };
+    }
+
+    if (allInt && clean.every(v => v >= 0)) {
+      const m = clean.reduce((a, b) => a + b, 0) / n;
+      const vv = clean.reduce((a, b) => a + (b - m) ** 2, 0) / n;
+      if (m > 0 && vv / m > 1.2) {
+        return { type: 'count', levels: [], n,
+          reason: `非负整数，方差/均值 = ${(vv / m).toFixed(2)}（>1.2）→ 疑似计数变量，建议用 Poisson 而非正态` };
+      }
+    }
+
+    return { type: 'continuous', levels: [], n,
+      reason: `连续数值，${uniq.length} 个不同取值，方差/均值比不指向计数` };
+  }
+
   /* ---------------- 交叉验证（分层 + 全指标） ---------------- */
   /**
    * 分层 K 折交叉验证。
@@ -1229,9 +1288,29 @@
     // 2) 目标变量离散化：先在全量有效样本上算一次"类别标签"仅用于分层；
     //    真正的分位数在每折内部用训练集重算（见下）。这里的分层只依据类别比例，
     //    属于允许的"先验设计"，不参与任何数值计算。
-    const yv = validRows.map(i => yRaw[i]);
-    const rough = calibrate(yv, { lowPct: o.lowPct, highPct: o.highPct, drops: 50, levels: o.levels, seed: o.seed });
-    const yClass = rough.codes;
+    const yvRaw = validRows.map(i => yRaw[i]);
+
+    // 目标变量类型：离散目标不再用云模型校准（否则 0/1 会被分位数切成"等级"，类别定义被篡改）
+    const tType = o.targetType || detectTargetType(yvRaw).type;
+    const discreteTarget = (tType === 'binary' || tType === 'categorical' || tType === 'ordinal');
+    let yvEnc = null, yLevels = null;
+    if (discreteTarget) {
+      const lv = (o.targetLevels && o.targetLevels.length)
+        ? o.targetLevels.slice()
+        : [...new Set(yvRaw)].sort((a, b) => (typeof a === 'number' && typeof b === 'number') ? a - b : String(a).localeCompare(String(b)));
+      yLevels = lv;
+      const m = new Map(lv.map((v, i) => [String(v), i]));
+      yvEnc = yvRaw.map(v => m.get(String(v)));
+    }
+    // 连续目标：仍然用云模型，但只在这里算一次作为"分层用的粗标签"
+    const yv = discreteTarget ? yvEnc : yvRaw;
+    const nLevels = discreteTarget ? (yLevels ? yLevels.length : 2) : o.levels;
+    const effLabels = discreteTarget ? (yLevels || []).map(String) : labels;
+
+    const rough = discreteTarget
+      ? { codes: yvEnc }
+      : calibrate(yvRaw, { lowPct: o.lowPct, highPct: o.highPct, drops: 50, levels: o.levels, seed: o.seed });
+    const stratLabel = rough.codes;   // 仅用于分层，不参与任何数值计算
 
     // 3) 切分：给了 groups 就先按组分块，保证同组不跨折
     let folds;
@@ -1239,12 +1318,15 @@
       const gv = validRows.map(i => groups[i]);
       folds = groupFolds(gv, Math.max(2, o.k), o.seed);
     } else {
-      folds = stratifiedFolds(yClass, Math.max(2, o.k), o.seed);
+      folds = stratifiedFolds(stratLabel, Math.max(2, o.k), o.seed);
     }
     const X = validRows.map(i => rawX[i].slice());
 
     const perFold = [];
     const oofPred = new Array(X.length).fill(-1);
+    // OOF 的"真实标签"必须来自各折自己的验证集标签（与预测同一口径），
+    // 不能用全量粗标签 stratLabel —— 那会导致混淆矩阵口径不一致
+    const oofTrue = new Array(X.length).fill(-1);
     const records = [];
 
     for (let f = 0; f < folds.length; f++) {
@@ -1291,9 +1373,12 @@
         const ss = col.sort((a, b) => a - b);
         bounds.push({ lo: quantile(ss, o.lowPct / 100), hi: quantile(ss, o.highPct / 100) });
       }
-      const ySorted = [...yTr].sort((a, b) => a - b);
-      const yBounds = { lo: quantile(ySorted, o.lowPct / 100), hi: quantile(ySorted, o.highPct / 100) };
-      if (!(yBounds.hi > yBounds.lo)) yBounds.hi = yBounds.lo + 1e-6;
+      let yBounds = null;
+      if (!discreteTarget) {
+        const ySorted = [...yTr].sort((a, b) => a - b);
+        yBounds = { lo: quantile(ySorted, o.lowPct / 100), hi: quantile(ySorted, o.highPct / 100) };
+        if (!(yBounds.hi > yBounds.lo)) yBounds.hi = yBounds.lo + 1e-6;
+      }
 
       // 按列批量离散化：每列只建一次云、只跑一轮云滴
       // （逐单元格调用会让复杂度乘上样本数，400×11 会慢几百倍）
@@ -1302,17 +1387,20 @@
       const teCols = names.map((_, j) => calibrateWith(teImp.map(r => r[j]), bounds[j], colOpt).codes);
       const XtrCodes = trImp.map((_, i) => names.map((_, j) => trCols[j][i]));
       const XteCodes = teImp.map((_, i) => names.map((_, j) => teCols[j][i]));
-      const yTrCodes = calibrateWith(yTr, yBounds, { levels: o.levels, drops: o.drops, seed: o.seed }).codes;
-      const yTeCodes = calibrateWith(yTe, yBounds, { levels: o.levels, drops: o.drops, seed: o.seed }).codes;
+      // 离散目标：真实标签就是编码本身；连续目标：用训练折的界离散化
+      const yTrCodes = discreteTarget ? yTr.slice()
+        : calibrateWith(yTr, yBounds, { levels: o.levels, drops: o.drops, seed: o.seed }).codes;
+      const yTeCodes = discreteTarget ? yTe.slice()
+        : calibrateWith(yTe, yBounds, { levels: o.levels, drops: o.drops, seed: o.seed }).codes;
 
       // ---- 3c) 建模（只用训练折）----
-      const tree = cart(XtrCodes, yTrCodes, names, labels, { maxDepth: o.treeDepth, minLeaf: o.minLeaf });
+      const tree = cart(XtrCodes, yTrCodes, names, effLabels, { maxDepth: o.treeDepth, minLeaf: o.minLeaf });
       const pred = XteCodes.map(r => predictTree(tree.root, r));
-      testIdx.forEach((i, k) => { oofPred[i] = pred[k]; });
+      testIdx.forEach((i, k) => { oofPred[i] = pred[k]; oofTrue[i] = yTeCodes[k]; });
 
       const trainPred = XtrCodes.map(r => predictTree(tree.root, r));
-      const trM = evalMetrics(yTrCodes, trainPred, o.levels);
-      const teM = evalMetrics(yTeCodes, pred, o.levels);
+      const trM = evalMetrics(yTrCodes, trainPred, nLevels);
+      const teM = evalMetrics(yTeCodes, pred, nLevels);
 
       perFold.push({
         fold: f + 1, nTrain: trainIdx.length, nTest: testIdx.length,
@@ -1336,16 +1424,21 @@
     }
 
     // 4) OOF 汇总
-    const keepIdx = [], keepPred = [];
-    for (let i = 0; i < X.length; i++) if (oofPred[i] >= 0) { keepIdx.push(i); keepPred.push(oofPred[i]); }
-    const oofY = keepIdx.map(i => yClass[i]);
-    const oofM = evalMetrics(oofY, keepPred, o.levels);
+    const keepIdx = [], keepPred = [], keepTrue = [];
+    for (let i = 0; i < X.length; i++) {
+      if (oofPred[i] >= 0 && oofTrue[i] >= 0) { keepIdx.push(i); keepPred.push(oofPred[i]); keepTrue.push(oofTrue[i]); }
+    }
+    const oofM = evalMetrics(keepTrue, keepPred, nLevels);
     const testAcc = perFold.map(f => f.testAccuracy);
 
     return {
       ok: perFold.length > 0,
       k: perFold.length,
       grouped: !!(groups && groups.length === yRaw.length),
+      targetType: tType,
+      discreteTarget,
+      targetLevels: yLevels,
+      nLevels,
       perFold,
       oof: { accuracy: oofM.accuracy, balancedAccuracy: oofM.balancedAccuracy, macroF1: oofM.macroF1, perClass: oofM.perClass, confusion: oofM.confusion, n: oofM.n },
       mean: mean(testAcc) || 0,
@@ -1788,7 +1881,7 @@
     parseCSV, parseXLSX, parseXLSXAll, toXLSX, profile, corrMatrix, calibrate, pearson, robustScale,
     crossValidate, crossValidateStrict, leakageAudit, stratifiedFolds, groupFolds, evalMetrics,
     weightedMean, weightedQuantile,
-    calibrateWith, buildClouds, assignCodes, assignCodesLUT, LUT_MIN_N, elbowCurve, robustness, nameScenarios,
+    calibrateWith, buildClouds, assignCodes, assignCodesLUT, LUT_MIN_N, detectTargetType, elbowCurve, robustness, nameScenarios,
     bnLearn, bnInfer, bnSensitivity, toCSV,
     kmeans, silhouette, pca, cart, network, report,
     numericCols, isNum, mean, std, quantile, LEVEL_LABELS
