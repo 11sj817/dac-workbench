@@ -1136,6 +1136,7 @@
   window.__dacFingerprint = dataFingerprint;
   window.__dacConfigFingerprint = configFingerprint;
   window.__dacState = () => S;          // 只读引用，便于控制台复核
+  window.__dacImportProject = null;     // 由 importProjectFile 所在作用域填入
 
   /* ---------------- 派生结果刷新 ----------------
    * 证据表 / 报告 / 摘要都依赖「当前」的严格CV、Bootstrap、GLM 结果。
@@ -4425,6 +4426,8 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
     toast(includeData ? '已导出（含数据）' : '已导出（不含原始数据，仅参数与结果）', 4000);
   }
 
+  window.__dacImportProject = (file) => importProjectFile(file);
+
   function importProjectFile(file) {
     file.text().then(txt => {
       let proj;
@@ -4450,11 +4453,16 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
           return null;
         }
         if (!want) {
-          toast('该项目来自旧版本，没有全量指纹，无法校验数据是否一致', 6000);
+          S.projWarn = '该项目来自旧版本，没有全量指纹，无法校验数据是否一致';
+          S.projMismatch = null;
+          toast(S.projWarn, 6000);
           return null;
         }
         const fp = await dataFingerprint(S.columns, S.rows);
         if (fp.hash === want) {
+          S.projWarn = null;
+          S.projMismatch = null;
+          S.projVerified = { hash: fp.hash, alg: fp.alg, rows: fp.rows, cols: fp.cols };
           toast(`数据校验通过（${fp.alg}，${fp.rows} 行 × ${fp.cols} 列）`, 4000);
           return true;
         }
@@ -4462,6 +4470,8 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
         const msg = `数据指纹不一致：项目 ${String(want).slice(0, 12)}… 当前 ${fp.hash.slice(0, 12)}…（${fp.alg}）`;
         toast(msg + ' —— 参数与结果可能与当前数据不对应', 9000);
         S.projMismatch = { want, got: fp.hash, alg: fp.alg };
+        S.projVerified = null;   // 不一致时不能留着上一次"通过"的记录
+        S.projWarn = null;
         return false;
       };
       const restored = verify();
