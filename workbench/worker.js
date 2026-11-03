@@ -66,6 +66,21 @@ const TASKS = {
   },
 
   /* 严格无泄漏交叉验证 */
+  /* 嵌套验证（外层评估 / 内层选参） */
+  nestedCV(payload, onProgress) {
+    const C = self.DACCore;
+    const { rawX, yRaw, names, labels, opt, groups } = payload;
+    if (!C.nestedCV) throw new Error('内核未提供 nestedCV');
+    onProgress(5);
+    const o = Object.assign({}, opt, {
+      onProgress: p => onProgress(5 + Math.round(p * 0.95))
+    });
+    const res = C.nestedCV(rawX, yRaw, names, labels, o, groups || null);
+    onProgress(100);
+    // records/perFold 里可能带大数组，回传时保留必要字段
+    return res;
+  },
+
   strictCV(payload, onProgress) {
     const C = self.DACCore;
     const { rawX, yRaw, names, labels, opts, groups } = payload;

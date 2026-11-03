@@ -1639,6 +1639,67 @@
   /* ---------------- 渲染：数据质量与预处理 ---------------- */
   const workingRows = () => (S.rowsWork && S.rowsWork.length ? S.rowsWork : S.rows);
 
+  /**
+   * 把配置对象压成可结构化克隆的纯数据。
+   * Worker 的 postMessage 走 structured clone，DOM 元素一律不能过。
+   * 之前 nestedOpt 里混进了一个 HTMLInputElement（checkbox 本身而不是 .checked），
+   * 报错 "HTMLInputElement object could not be cloned"。
+   */
+  function toPlain(o) {
+    if (o === null || o === undefined) return o;
+    const t = typeof o;
+    if (t === 'number' || t === 'string' || t === 'boolean') return o;
+    if (Array.isArray(o)) return o.map(toPlain);
+    if (t === 'object') {
+      // DOM 节点直接丢弃
+      if (typeof o.nodeType === 'number') return undefined;
+      const out = {};
+      Object.keys(o).forEach(k => {
+        const v = toPlain(o[k]);
+        if (v !== undefined) out[k] = v;
+      });
+      return out;
+    }
+    return undefined;
+  }
+
+  function renderNestedOut(box, nr) {
+    box.innerHTML = '';
+    if (!nr) return;
+    if (!nr.ok) {
+      box.innerHTML = '<div class="testout bad">嵌套验证未完成：' + esc(nr.reason || '未知原因') + '</div>';
+      return;
+    }
+    const fmt = x => (x === null || x === undefined) ? '—' : (x * 100).toFixed(1) + '%';
+    const pp = x => (x === null || x === undefined) ? '—' : ((x >= 0 ? '+' : '') + (x * 100).toFixed(1)) + 'pp';
+    const tbl = el('table');
+    tbl.appendChild(el('thead', { html: '<tr><th>折</th><th>训练</th><th>测试</th><th>内层选出</th><th>内层 BalAcc</th><th>外层 Acc</th></tr>' }));
+    const tb = el('tbody');
+    (nr.perFold || []).forEach(f => {
+      tb.appendChild(el('tr', { html: f.ok
+        ? `<td>${f.fold}</td><td>${f.nTrain}</td><td>${f.nTest}</td>
+           <td>d${f.chosen.treeDepth}-l${f.chosen.minLeaf}</td>
+           <td>${fmt(f.innerScore)}</td><td><b>${fmt(f.outerAcc)}</b></td>`
+        : `<td>${f.fold}</td><td colspan="5" class="muted">${esc(f.reason || '跳过')}</td>` }));
+    });
+    tbl.appendChild(tb);
+
+    const box2 = el('div', { class: 'testout ' + (nr.nestedAccuracy !== null ? 'ok' : 'bad') });
+    box2.innerHTML =
+      `<b>嵌套验证（外层 ${nr.k} 折 × 网格 ${nr.grid} 点）</b><br>`
+      + `嵌套精度（无偏泛化估计） <b>${fmt(nr.nestedAccuracy)}</b> · Balanced ${fmt(nr.nestedBalancedAccuracy)}<br>`
+      + `同参数普通 CV <b>${fmt(nr.plainAccuracy)}</b> · Balanced ${fmt(nr.plainBalancedAccuracy)}<br>`
+      + `选参乐观偏差 <b>${pp(nr.optimism)}</b>`
+      + (nr.paramStability !== null ? `　参数稳定性 <b>${nr.paramStability.toFixed(2)}</b>` : '')
+      + (nr._via ? `　<span class="muted">（${nr._via === 'worker' ? '后台线程' : '主线程回退'}）</span>` : '')
+      + `<div class="muted" style="margin-top:6px">${esc(nr.note || '')}</div>`
+      + `<div class="muted" style="margin-top:4px">各折选出：${esc(Object.entries(nr.selectedParams || {}).map(([k, v]) => k + '×' + v).join('，') || '—')}</div>`;
+
+    box.appendChild(box2);
+    box.appendChild(el('div', { class: 'muted', style: 'margin:8px 0', text: '逐折明细：' }));
+    box.appendChild(tbl);
+  }
+
   function renderQuality() {
     const pane = $('#pane');
     const P = window.DACPre;
@@ -1922,6 +1983,82 @@
         renderQuality();
     };
     outBox.appendChild(btnRun);
+
+    // 嵌套验证：外层评估、内层选参。避免"用测试折信息调参"导致的乐观估计。
+    const btnNest = el('button', { class: 'mini', text: '运行嵌套验证' });
+    const nestOut = el('div', { style: 'margin-top:8px' });
+    btnNest.onclick = async () => {
+      btnNest.disabled = true;
+      btnNest.textContent = '嵌套计算中…';
+      nestOut.innerHTML = '';
+      try {
+        const target = S.target || names[names.length - 1];
+        const idxT = names.indexOf(target);
+        const factorIdx = names.map((n, j) => j).filter(j => j !== idxT && S.numeric.includes(names[j]));
+        if (factorIdx.length < 1) throw new Error('至少需要一个数值型条件变量');
+        const rawX = WR.map(r => factorIdx.map(j => r[j]));
+        const yRaw = WR.map(r => r[idxT]);
+        const fnames = factorIdx.map(j => names[j]);
+        const gCol = names.find(n => S.roles[n] === 'group');
+        const groups = gCol ? WR.map(r2 => r2[names.indexOf(gCol)]) : null;
+        const tCol = names.find(n => S.roles[n] === 'time');
+        const nestOpt = {
+          k: q.k, innerK: 3, seed: q.seed,
+          impute: q.strategy,
+          knn: { k: Number(q.knnK) || 5, weighted: q.weighted === true || q.weighted === 'true' },
+          lowPct: S.params.lowPct || 25, highPct: S.params.highPct || 75,
+          levels, drops: Math.min(150, S.params.drops || 150),
+          treeDepth: S.params.treeDepth || 3,
+          minLeaf: Math.max(10, Math.round(WR.length / 40)),
+          targetType: (S.res && S.res.meta && S.res.meta.targetType && S.res.meta.targetType.type) || undefined,
+          rowIds: (WR === S.rows && S.res && S.res.meta) ? S.res.meta.rowIds : null
+        };
+        if (tCol) {
+          const ti = names.indexOf(tCol);
+          const okAll = WR.map((_, i) => i).filter(i => Number.isFinite(typeof WR[i][ti] === 'number' ? WR[i][ti] : Date.parse(WR[i][ti])));
+          if (okAll.length >= 20 && okAll.length === WR.length) nestOpt.timeOrder = okAll.sort((a, b) => {
+            const va = typeof WR[a][ti] === 'number' ? WR[a][ti] : Date.parse(WR[a][ti]);
+            const vb = typeof WR[b][ti] === 'number' ? WR[b][ti] : Date.parse(WR[b][ti]);
+            return va - vb;
+          });
+        }
+        setBusy(true, '嵌套验证…');
+        let nr, via = 'worker';
+        const payload = toPlain({
+          rawX, yRaw, names: fnames,
+          labels: C.LEVEL_LABELS[levels] || ['低', '中', '高'],
+          opt: nestOpt, groups
+        });
+        try {
+          nr = await WK.run('nestedCV', payload,
+            { onProgress: p3 => setBusy(true, '嵌套验证 ' + p3 + '%'), timeoutMs: 300000 });
+        } catch (e3) {
+          // Worker 只是提速手段，不是必需。任何 Worker 侧失败都退回主线程重算，
+          // 而不是把用户挡在"嵌套验证不可用"这里。
+          via = 'main';
+          console.warn('嵌套验证 Worker 失败，回退主线程：', e3 && e3.message);
+          nr = C.nestedCV(payload.rawX, payload.yRaw, payload.names,
+            payload.labels, payload.opt, groups);
+        }
+        nr._via = via;
+        setBusy(false);
+        q.nested = nr;
+        refreshDerived();
+        renderNestedOut(nestOut, nr);
+      } catch (e) {
+        setBusy(false);
+        q.nested = { ok: false, reason: e.message };
+        nestOut.innerHTML = '<div class="testout bad">嵌套验证失败：' + esc(e.message) + '</div>';
+      } finally {
+        btnNest.disabled = false;
+        btnNest.textContent = '运行嵌套验证';
+      }
+    };
+    outBox.appendChild(btnNest);
+    outBox.appendChild(nestOut);
+
+    // 已有结果就重绘
+    if (q.nested) renderNestedOut(nestOut, q.nested);
     pane.appendChild(outBox);
 
     if (q.strict) {

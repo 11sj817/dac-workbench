@@ -1522,7 +1522,14 @@
     //    分组切分：同一个组（如同一家医院/同一个用户）的样本必须全在同一侧。
     let folds;
     let splitKind = 'stratified';
-    if (o.timeOrder && o.timeOrder.length === yRaw.length) {
+    if (Array.isArray(o.fixedFolds) && o.fixedFolds.length) {
+      // 调用方直接指定折（嵌套验证需要："这一折的训练/测试就按我说的来"）
+      folds = o.fixedFolds.map(f => ({
+        train: (f.train || []).slice(),
+        test: (f.test || []).slice()
+      }));
+      splitKind = 'fixed';
+    } else if (o.timeOrder && o.timeOrder.length === yRaw.length) {
       // timeOrder 是原始行下标按时间升序排好的序列
       const ordered = o.timeOrder.filter(i => validRowsSet.has(i));
       const K = Math.max(2, Math.min(o.k, Math.floor(ordered.length / 10) || 2));
@@ -1557,11 +1564,16 @@
     const records = [];
 
     for (let f = 0; f < folds.length; f++) {
-      const testIdx = folds[f];
-      if (testIdx.length < 2) continue;
+      const fd = folds[f];
+      const testIdx = Array.isArray(fd) ? fd : fd.test;
+      if (!testIdx || testIdx.length < 2) continue;
       const testSet = new Set(testIdx);
       const trainIdx = [];
-      if (splitKind === 'time') {
+      if (!Array.isArray(fd) && Array.isArray(fd.train)) {
+        // 调用方给了明确的训练集
+        trainIdx.push(...fd.train);
+        if (!trainIdx.length) { perFold.push({ fold: f + 1, ok: false, reason: '训练集为空' }); continue; }
+      } else if (splitKind === 'time') {
         // 只允许用比当前折更早的样本训练，绝不使用未来数据
         const minTest = Math.min(...testIdx);
         for (let i = 0; i < X.length; i++) if (i < minTest && !testSet.has(i)) trainIdx.push(i);
@@ -1646,7 +1658,9 @@
         fold: f + 1, nTrain: trainIdx.length, nTest: testIdx.length,
         trainAccuracy: trM.accuracy, testAccuracy: teM.accuracy,
         balancedAccuracy: teM.balancedAccuracy, macroF1: teM.macroF1,
-        perClass: teM.perClass, confusion: teM.confusion
+        perClass: teM.perClass, confusion: teM.confusion,
+        // 测试折逐条预测：嵌套验证要拿它算"纯测试集"精度，别的统计也要
+        testPred: pred.slice()
       });
 
       records.push({
@@ -1715,6 +1729,197 @@
       excludedByTarget,
       strict: true,
       records
+    };
+  }
+
+  /**
+   * 嵌套交叉验证：外层评估、内层选参。
+   *
+   * 与直接 CV 的区别：
+   *   直接 CV 的 treeDepth / minLeaf 由调用方给定。如果这个值是「看着 CV 精度调出来的」，
+   *   那 CV 精度就吃了测试折的信息，是个乐观估计。
+   *   嵌套 CV 里，外层每折的训练部分再切内层 J 折，用内层 OOF 精度挑参数，
+   *   然后拿这组参数在外层测试折上评估一次。外层测试折全程不可见。
+   *
+   * @param {number[][]} rawX
+   * @param {number[]} yRaw
+   * @param {string[]} names
+   * @param {string[]} labels
+   * @param {object} opt  与 crossValidateStrict 同参；grid 可覆盖默认网格
+   * @param {string[]} [groups]
+   * @returns {object}
+   */
+  function nestedCV(rawX, yRaw, names, labels, opt, groups) {
+    const o = Object.assign({
+      k: 5, innerK: 3, seed: 42,
+      grid: null,
+      onProgress: null
+    }, opt || {});
+
+    const grid = o.grid && o.grid.length ? o.grid : [
+      { treeDepth: 3, minLeaf: 15 },
+      { treeDepth: 4, minLeaf: 15 },
+      { treeDepth: 3, minLeaf: 30 },
+      { treeDepth: 4, minLeaf: 30 }
+    ];
+
+    // 外层：先跑一次同参数的 CV 拿到折结构（训练/测试下标）
+    const outer = crossValidateStrict(rawX, yRaw, names, labels,
+      Object.assign({}, o, { nested: false }), groups);
+
+    if (!outer.ok) {
+      return { ok: false, reason: outer.reason || '外层切分失败', outer };
+    }
+
+    const base = { lowPct: 25, highPct: 75, levels: 3, drops: 200 };
+    const pick = Object.assign({}, base, {
+      impute: o.impute || 'median',
+      knn: o.knn,
+      targetType: o.targetType
+    });
+
+    const perFold = [];
+    const oofPred = [];
+    const oofTrue = [];
+    const oofRowId = [];
+    const selected = [];
+    let done = 0;
+
+    for (const rec of (outer.records || [])) {
+      const trRaw = rec.trainRawIdx || rec.trainIdx;
+      const teRaw = rec.testRawIdx || rec.testIdx;
+      if (!trRaw || !teRaw || trRaw.length < 20 || !teRaw.length) continue;
+
+      const Xtr = trRaw.map(i => rawX[i].slice());
+      const yTr = trRaw.map(i => yRaw[i]);
+      const gTr = groups ? trRaw.map(i => groups[i]) : null;
+
+      // ---- 内层：只在训练折内部网格搜索 ----
+      let best = null;
+      for (const g of grid) {
+        let inner;
+        try {
+          inner = crossValidateStrict(Xtr, yTr, names, labels,
+            Object.assign({}, pick, {
+              k: Math.min(o.innerK, 3),
+              treeDepth: g.treeDepth,
+              minLeaf: Math.max(3, Math.min(g.minLeaf, Math.floor(Xtr.length / 12))),
+              seed: o.seed
+            }), gTr);
+        } catch (e) {
+          continue;
+        }
+        if (!inner.ok) continue;
+        // 用 Balanced Accuracy 选参：类别不均衡时比 accuracy 稳
+        const score = inner.oof.balancedAccuracy;
+        if (!best || score > best.score) {
+          best = { score, params: g, innerAcc: inner.oof.accuracy };
+        }
+      }
+      if (!best) {
+        perFold.push({ fold: rec.fold, ok: false, reason: '内层网格全部失败' });
+        continue;
+      }
+
+      // ---- 外层：用内层选出的参数，在完整训练折上重训，只预测测试折 ----
+      // 关键：用 fixedFolds 明确指定"这一折的训练/测试"，拿到的就是纯测试集精度。
+      // 早先用 k=2 的 OOF 平均，里面混了训练折样本的预测，导致嵌套精度反而更高。
+      const Xte = teRaw.map(i => rawX[i].slice());
+      const yTe = teRaw.map(i => yRaw[i]);
+      const Xcat = Xtr.concat(Xte);
+      const yCat = yTr.concat(yTe);
+      const nTr = Xtr.length;
+
+      let evalRes;
+      try {
+        evalRes = crossValidateStrict(Xcat, yCat, names, labels,
+          Object.assign({}, pick, {
+            treeDepth: best.params.treeDepth,
+            minLeaf: Math.max(3, Math.min(best.params.minLeaf, Math.floor(Xtr.length / 12))),
+            seed: o.seed,
+            targetType: o.targetType,
+            fixedFolds: [{
+              train: Array.from({ length: nTr }, (_, k) => k),
+              test: Array.from({ length: Xte.length }, (_, k) => nTr + k)
+            }]
+          }), null);
+      } catch (e) {
+        perFold.push({ fold: rec.fold, ok: false, reason: '外层评估失败：' + e.message });
+        continue;
+      }
+
+      const pf = (evalRes.perFold || [])[0];
+      const okFold = !!(evalRes.ok && pf && pf.testAccuracy !== undefined);
+      perFold.push({
+        fold: rec.fold,
+        ok: okFold,
+        nTrain: trRaw.length,
+        nTest: teRaw.length,
+        chosen: best.params,
+        innerScore: best.score,
+        innerAcc: best.innerAcc,
+        outerAcc: okFold ? pf.testAccuracy : null,
+        outerBalAcc: okFold ? pf.balancedAccuracy : null,
+        nTestPredicted: okFold ? Xte.length : 0
+      });
+      selected.push(best.params);
+
+      if (okFold) {
+        // 纯测试集的预测：可按 rowId 追回
+        const preds = pf.testPred || pf.oofPred || null;
+        teRaw.forEach((rawIdx, k) => {
+          oofRowId.push((o.rowIds && o.rowIds[rawIdx] !== undefined) ? o.rowIds[rawIdx] : (rawIdx + 1));
+          oofPred.push(preds ? preds[k] : -1);
+          oofTrue.push(yTe[k]);
+        });
+      }
+      done++;
+      if (typeof o.onProgress === 'function') {
+        o.onProgress(Math.round(done / Math.max(1, (outer.records || []).length) * 100));
+      }
+    }
+
+    const okFolds = perFold.filter(f => f.ok && f.outerAcc !== null);
+    const meanOuter = okFolds.length
+      ? okFolds.reduce((a, f) => a + f.outerAcc, 0) / okFolds.length : null;
+    const meanOuterBal = okFolds.length
+      ? okFolds.reduce((a, f) => a + f.outerBalAcc, 0) / okFolds.length : null;
+
+    // 选参的稳定性：不同外层折选出不同参数，说明参数不稳、结论对外部条件敏感
+    const paramKey = p => `d${p.treeDepth}-l${p.minLeaf}`;
+    const counts = {};
+    selected.forEach(p => { counts[paramKey(p)] = (counts[paramKey(p)] || 0) + 1; });
+    const distinct = Object.keys(counts).length;
+
+    return {
+      ok: okFolds.length > 0,
+      nested: true,
+      k: okFolds.length,
+      grid: grid.length,
+      perFold,
+      selectedParams: counts,
+      paramStability: selected.length ? (1 - (distinct - 1) / Math.max(1, selected.length)) : null,
+      // 逐条样本的外层预测：全部来自外层测试折，训练折样本不在内
+      oof: oofRowId.length ? {
+        rowId: oofRowId,
+        pred: oofPred,
+        true: oofTrue,
+        n: oofRowId.length,
+        accuracy: meanOuter,
+        balancedAccuracy: meanOuterBal
+      } : null,
+      // 嵌套 CV 的精度：这是无偏的泛化估计
+      nestedAccuracy: meanOuter,
+      nestedBalancedAccuracy: meanOuterBal,
+      // 与之对比：用固定参数跑普通 CV 的精度（会偏乐观）
+      plainAccuracy: outer.oof ? outer.oof.accuracy : null,
+      plainBalancedAccuracy: outer.oof ? outer.oof.balancedAccuracy : null,
+      optimism: (meanOuter !== null && outer.oof)
+        ? outer.oof.accuracy - meanOuter : null,
+      // 外层切分沿用同一种策略
+      splitKind: outer.splitKind,
+      note: '嵌套 CV 的 nestedAccuracy 是无偏泛化估计；plainAccuracy 是固定参数下的普通 CV，'
+          + '若参数是看着 CV 结果调的，plainAccuracy 会偏乐观。两者差 = 选参乐观偏差。'
     };
   }
 
@@ -2230,7 +2435,7 @@
     crossValidate, crossValidateStrict, leakageAudit, stratifiedFolds, groupFolds, evalMetrics,
     weightedMean, weightedQuantile,
     calibrateWith, buildClouds, assignCodes, assignCodesLUT, LUT_MIN_N, detectTargetType, elbowCurve, robustness, nameScenarios,
-    zipFiles, toDOCX, bnLearn, bnInfer, bnSensitivity, bnValidateDag, bnStateSpace, BN_MAX_JOINT, toCSV,
+    zipFiles, toDOCX, nestedCV, bnLearn, bnInfer, bnSensitivity, bnValidateDag, bnStateSpace, BN_MAX_JOINT, toCSV,
     kmeans, silhouette, pca, cart, predictTree, network, report,
     numericCols, isNum, mean, std, quantile, LEVEL_LABELS
   };
