@@ -397,6 +397,9 @@
 
     S.target = t.value;
     renderFactors();
+    // S.roles 才是持久状态；复选框只是它的视图。
+    // 如果 UI 被重建导致 pickedFactors() 读不到，#btnRun 会拿空因子直接 return。
+    S.factors = S.columns.filter(c => c !== S.target && (S.roles[c] === 'num' || S.roles[c] === 'cat'));
     setStep(2);
     S.tab = 'profile';
     setTab('profile');
@@ -572,11 +575,25 @@
 
   function run() {
     if (!S.columns.length) return toast('先导入数据');
-    const factors = pickedFactors();
+    let factors = pickedFactors();
+    if (!factors.length) {
+      // 复选框读不到（例如面板被重建）时，回退到角色推导，而不是直接拒绝执行
+      factors = (S.factors && S.factors.length)
+        ? S.factors.slice()
+        : S.columns.filter(c => c !== ($('#target') ? $('#target').value : S.target)
+            && (S.roles[c] === 'num' || S.roles[c] === 'cat'));
+    }
     if (!factors.length) return toast('至少选一个条件变量');
-    S.target = $('#target').value;
-    S.factors = factors;
-    S.params = readParams();
+    // 参数读取也可能抛错（元素被重建等）；失败要让用户看见，而不是点了没反应
+    try {
+      S.target = ($('#target') && $('#target').value) || S.target;
+      S.factors = factors;
+      S.params = readParams();
+    } catch (e) {
+      $('#status').textContent = '参数读取失败';
+      toast('参数读取失败：' + (e && e.message || e) + '（请刷新页面重试）', 8000);
+      return;
+    }
     $('#loadbar').classList.add('on');
     const t0 = performance.now();
     setTimeout(() => {
@@ -1155,6 +1172,7 @@
   window.__dacFingerprint = dataFingerprint;
   window.__dacConfigFingerprint = configFingerprint;
   window.__dacState = () => S;          // 只读引用，便于控制台复核
+  window.__dacRun = () => run();        // 便于测试与自动化；与点「运行完整分析」等价
   window.__dacImportProject = null;     // 由 importProjectFile 所在作用域填入
 
   /* ---------------- 派生结果刷新 ----------------
@@ -2636,6 +2654,20 @@
 
     const selResp = el('select', {});
     selResp.appendChild(el('option', { value: '', text: '— 选择目标变量 —' }));
+    // 自变量也默认跟随主分析：用户在主分析里选过哪些因子，GLM 就用哪些
+    if (!q.xvars.length && S.res && S.res.meta && Array.isArray(S.res.meta.factors)) {
+      q.xvars = S.res.meta.factors.filter(f => f !== S.res.meta.target && S.numeric.indexOf(f) >= 0);
+    }
+    // 主分析已经确定了目标变量，GLM 不该再让用户重选一次
+    if (!q.response && S.res && S.res.meta && S.res.meta.target && S.numeric.indexOf(S.res.meta.target) >= 0) {
+      q.response = S.res.meta.target;
+      const tt = types[q.response];
+      if (tt) {
+        if (tt.type === 'binary') q.family = 'binomial';
+        else if (tt.type === 'count') q.family = 'poisson';
+        else q.family = 'gaussian';
+      }
+    }
     S.numeric.forEach(c => {
       const t = types[c];
       const o = el('option', { value: c, text: `${c}（${t.type}）` });
@@ -4691,6 +4723,23 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
         if (proj.selections.target) S.target = proj.selections.target;
         if (Array.isArray(proj.selections.factors)) S.factors = proj.selections.factors.slice();
       }
+      // 关键：把目标同步回下拉框。否则 run() 里 S.target = $('#target').value
+      // 会用上一个数据集残留的值覆盖项目里的目标（实测：wine 项目重开后目标变成 iris 的品种编码）
+      (function syncTargetSelect() {
+        const sel = $('#target');
+        if (!sel) return;
+        const cols = S.columns || [];
+        sel.innerHTML = '';
+        (S.numeric || []).forEach(c => sel.appendChild(el('option', { value: c, text: c })));
+        if (S.target && cols.indexOf(S.target) >= 0) sel.value = S.target;
+        if (typeof renderFactors === 'function') { try { renderFactors(); } catch (e) { } }
+        // 下拉里可能没有这个列（列已被替换），那就明确报出来
+        if (S.target && sel.value !== S.target) {
+          S.projWarn = (S.projWarn ? S.projWarn + '；' : '') +
+            `项目目标「${S.target}」不在当前数据列里，已回退到「${sel.value}」`;
+          toast(S.projWarn, 8000);
+        }
+      })();
       if (proj.params) {
         const pp = proj.params;
         if (pp.lowPct) { $('#low').value = pp.lowPct; $('#vLow').textContent = pp.lowPct + '%'; }
