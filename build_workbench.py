@@ -47,22 +47,24 @@ _build_info = {
     "digest": _build_digest,
     "time": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     "sourceCommit": _git(["rev-parse", "HEAD"]),
-    "sourceDirty": bool((_git(["status", "--porcelain"]) or "").strip()),
+    "sourceDirty": bool((_git(["status", "--porcelain", "--",
+        "workbench", "data/samples.js", "build_workbench.py"]) or "").strip()),
+    "sourceDirtyScope": "build inputs: workbench/, data/samples.js, build_workbench.py",
     "note": "sourceCommit 是构建时本地 HEAD；部署提交是推送后生成的新提交，两者不同属正常。",
 }
 _build_js = json.dumps(_build_info, ensure_ascii=False).replace("</", "<\\/")
 html = html.replace("<script>", "<script>window.__BUILD__ = " + _build_js + ";</script>\n<script>", 1)
 
-OUT.write_text(html, encoding="utf-8")
+OUT.write_text(html, encoding="utf-8", newline="\n")
 
 # V3.0：统一构建——一个源，三处产物，避免"改了源码但线上没更新"
 TARGETS = [ROOT / "docs" / "index.html", ROOT / "public" / "index.html"]
 for t in TARGETS:
     t.parent.mkdir(parents=True, exist_ok=True)
-    t.write_text(html, encoding="utf-8")
+    t.write_text(html, encoding="utf-8", newline="\n")
 
-# 一致性校验：三份产物的 SHA1 必须相同
-def _h(x): return hashlib.sha1(x.read_bytes()).hexdigest()[:12]
+# 一致性校验：三份产物的 SHA-256 必须相同，换行统一为 LF。
+def _h(x): return hashlib.sha256(x.read_bytes()).hexdigest()
 hashes = {str(OUT.relative_to(ROOT)): _h(OUT)}
 for t in TARGETS:
     hashes[str(t.relative_to(ROOT))] = _h(t)

@@ -170,5 +170,5 @@ function check(name,f){f();pass++;console.log('PASS '+name);}
   $('#btnPalette').click();assert.equal($('#palettePanel').hidden,false);
  });
  check('no uncaught UI errors across the integration path',()=>assert.deepEqual(errors,[]));
- console.log(`${pass} UI integration groups passed${process.env.DAC_SITE_HTML?' against downloaded deployed HTML':''}`);
+ console.log(`${pass} UI integration groups passed${process.env.DAC_SITE_HTML?' against supplied bundled HTML':''}`);
 })().catch(e=>{console.error(e.stack);process.exitCode=1;}).finally(()=>w.close());
