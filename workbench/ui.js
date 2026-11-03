@@ -3080,6 +3080,38 @@
     return [...new Set(bad)].slice(0, 6);
   }
 
+  /**
+   * 从 AI 回答里找出它引用到的证据项。
+   * 做法：把证据表里的格式化值/原始值都拿去匹配回答文本，命中即列出 metricId。
+   * 这不是"验证 AI 说得对"，只是告诉读者"这段里出现的数字能对应到哪几条证据"。
+   */
+  function matchEvidence(text, list) {
+    if (!text || !list || !list.length) return [];
+    const hit = [];
+    list.forEach(e => {
+      if (e.valid === false) return;
+      const forms = new Set();
+      if (typeof e.value === 'number' && Number.isFinite(e.value)) {
+        forms.add(String(e.value));
+        forms.add(e.value.toFixed(1));
+        forms.add(e.value.toFixed(2));
+        forms.add(e.value.toFixed(3));
+        if (Math.abs(e.value) <= 1) {
+          forms.add((e.value * 100).toFixed(1));
+          forms.add((e.value * 100).toFixed(0));
+        }
+      }
+      if (e.formatted) forms.add(String(e.formatted).replace(/[^\d.\-]/g, ''));
+      let ok = false;
+      forms.forEach(f => {
+        if (!f || f.length < 2) return;
+        if (text.indexOf(f) >= 0) ok = true;
+      });
+      if (ok) hit.push(e);
+    });
+    return hit;
+  }
+
   function renderAI() {
     const pane = $('#pane'), r = S.res, cfg = aiCfg();
     pane.innerHTML = '';
@@ -3464,10 +3496,13 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
         const ms = Math.round(performance.now() - t0);
         let bad = [];
         try { bad = r ? (auditNumbers(txt2, r) || []) : []; } catch (e) { bad = []; }
+        let refs = [];
+        try { refs = matchEvidence(txt2, r && r.evidence); } catch (e) { refs = []; }
         const meta = `${ms}ms · ` + (bad.length
           ? `${bad.length} 个数字未在结果中找到：${bad.slice(0, 4).join(', ')}`
-          : '数字溯源通过');
-        chat.push({ role: 'assistant', content: txt2, meta });
+          : '数字溯源通过')
+          + (refs.length ? ` · 引用证据 ${refs.slice(0, 4).map(e => e.id).join('、')}${refs.length > 4 ? ' 等 ' + refs.length + ' 项' : ''}` : '');
+        chat.push({ role: 'assistant', content: txt2, meta, refs: refs.map(e => e.id) });
       } catch (e) {
         chat.push({ role: 'assistant', content: '⚠ ' + diagnose(e) + '\n' + String(e.message).slice(0, 320), meta: '请求失败' });
       }
