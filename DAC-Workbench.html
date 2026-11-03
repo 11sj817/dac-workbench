@@ -4934,7 +4934,29 @@ window.__DATASETS__ = {"iris": {"name": "鸢尾花（UCI Iris，150 条）", "de
     }
 
     const res = {
-      meta: { target, factors, rows: S.rows.length, usedRows: keep.length, params },
+      meta: {
+        target, factors, rows: S.rows.length, usedRows: keep.length, params,
+        // 目标类型决定后续能不能算 Pearson、能不能比均值 —— 必须一路带下去
+        targetType: (function () {
+          let detected = { type: 'continuous', levels: 0, reason: '' };
+          try {
+            const idx = S.columns.indexOf(target);
+            detected = C.detectTargetType(S.rows.map(r => r[idx]));
+          } catch (e) { }
+          // detectTargetType 的 levels 是「取值数组」，统一成计数便于使用
+          const nLevels = Array.isArray(detected.levels) ? detected.levels.length
+            : (typeof detected.levels === 'number' ? detected.levels : 0);
+          const out = Object.assign({}, detected, { levels: nLevels, levelValues: detected.levels });
+          // 数据集元数据里声明的类型优先：有序等级不能被自动检测降级成无序
+          const declared = S.dsMeta && S.dsMeta.targetType;
+          const ALLOW = ['nominal', 'ordinal', 'binary', 'continuous', 'count', 'categorical'];
+          if (declared && ALLOW.indexOf(declared) >= 0) {
+            out.type = declared;
+            out.declared = true;
+          }
+          return out;
+        })()
+      },
       profile: C.profile(S.columns, S.rows),
       corr: C.corrMatrix(S.columns, S.rows),
       calibration: { factors: cal, target: calY, labels },
@@ -5061,6 +5083,18 @@ window.__DATASETS__ = {"iris": {"name": "鸢尾花（UCI Iris，150 条）", "de
         note: '主报告应优先引用严格 CV 结果'
       });
     }
+    // 预测时点：某些变量在"预测目标发生之前"根本还不存在
+    const caveat = (S.dsMeta && S.dsMeta.caveatPredictors) || [];
+    if (caveat.length && r.meta.factors.some(f => caveat.indexOf(f) >= 0)) {
+      const used = r.meta.factors.filter(f => caveat.indexOf(f) >= 0);
+      F.push({
+        tag: '时点',
+        text: `本次把 <b>${used.map(esc).join('、')}</b> 当成了预测变量。` +
+          `<span class="warnline">如果研究任务是"在目标发生之前做预测"，这些变量当时还不存在，属于信息泄漏。</span>` +
+          `<span class="muted">这不是靠相关系数判断的——要看数据是怎么采集的。若目标是"事后解释"，把它们放进来是合理的。</span>`
+      });
+    }
+
     const st = RES.strictOk();
     if (st && st.ok) {
       add('strictCV.oofAcc', '严格 CV · OOF 准确率', st.oof.accuracy, {
@@ -5261,6 +5295,30 @@ window.__DATASETS__ = {"iris": {"name": "鸢尾花（UCI Iris，150 条）", "de
     if (S.tab === 'report') { try { renderReport(); } catch (e) { } }
   }
 
+  /* ---------------- 目标类型保护 ----------------
+   * 无序类别（nominal/categorical/binary）不能：
+   *   1) 用皮尔逊相关描述"线性关联"——编码 0/1/2 的数值差没有含义
+   *   2) 比均值排名——"均值最高的类别"是伪命题
+   *   3) 用 |r| > 0.95 判定特征泄漏——编码顺序会改变 r
+   * 有序（ordinal）可以比均值，但要说明是有序的。
+   * ------------------------------------------------------ */
+  const NOMINAL_TYPES = ['binary', 'categorical', 'nominal'];
+
+  function tgtInfo(r) {
+    const t = (r && r.meta && r.meta.targetType) || {};
+    const ty = t.type || 'continuous';
+    const levels = Array.isArray(t.levels) ? t.levels.length : (t.levels || 0);
+    return {
+      type: ty,
+      levels,
+      reason: t.reason || '',
+      nominal: NOMINAL_TYPES.indexOf(ty) >= 0,
+      ordinal: ty === 'ordinal',
+      label: ({ binary: '二分类', categorical: '无序类别', nominal: '无序类别',
+        ordinal: '有序类别', count: '计数', continuous: '连续' })[ty] || ty
+    };
+  }
+
   /* ---------------- 结论解读：观察 + 机制 ----------------
    * 参考成熟产品的 findings / mechanism 两段式，但避开它们的三个错误：
    *   1) 分组高低不能取同一个索引
@@ -5282,9 +5340,19 @@ window.__DATASETS__ = {"iris": {"name": "鸢尾花（UCI Iris，150 条）", "de
         `缺失 ${miss} 个单元格、IQR 异常候选 ${outl} 个。`
     });
 
+    const TI = tgtInfo(r);
     const corr = r.corr;
     const corrNames = corr && (corr.columns || corr.names);
-    if (corr && corr.matrix && corrNames) {
+    if (TI.nominal) {
+      // 无序类别的编码 0/1/2 是标签，不是数量：Pearson 没有意义，换编码顺序结论就变
+      F.push({
+        tag: '关联',
+        text: `目标「${esc(tgt)}」是<b>${TI.label}</b>（${TI.levels} 个类别），` +
+          `编码只是标签，没有大小顺序，因此<b>不用皮尔逊相关描述</b>，也不给类别排高低。` +
+          `<span class="muted">换个编码顺序，r 就会变——用它做"线性关联"会得出伪结论。` +
+          `要看组间差异请用「异质性」段的类别分布，或到统计建模里做多项/二项判别。</span>`
+      });
+    } else if (corr && corr.matrix && corrNames) {
       const idx = corrNames.indexOf(tgt);
       if (idx >= 0) {
         const pairs = corrNames
@@ -5296,7 +5364,10 @@ window.__DATASETS__ = {"iris": {"name": "鸢尾花（UCI Iris，150 条）", "de
           F.push({
             tag: '关联',
             text: `与「${esc(tgt)}」线性关联最强的是 ${top}。` +
-              `<span class="muted">这是相关系数，不是因果效应，也不代表预测价值。</span>`
+              (TI.ordinal
+                ? `<span class="muted">目标是有序类别，Pearson 建立在"等级间隔相等"的假设上；` +
+                  `这是相关系数，不是因果效应，也不代表预测价值。</span>`
+                : `<span class="muted">这是相关系数，不是因果效应，也不代表预测价值。</span>`)
           });
         }
       }
@@ -5311,26 +5382,39 @@ window.__DATASETS__ = {"iris": {"name": "鸢尾花（UCI Iris，150 条）", "de
       const loTag = (sc.names && sc.names[sc.stats.indexOf(lo)]) || {};
       const hiName = hiTag.tag ? `${hi.name}「${hiTag.tag}」` : hi.name;
       const loName = loTag.tag ? `${lo.name}「${loTag.tag}」` : lo.name;
-      const hiV = hi.mean[tgt], loV = lo.mean[tgt];
-      const tie = Math.abs(hiV - loV) < 1e-12;
-      // 并列要如实说：不能把"所有组一样"写成"最高/最低"
-      const tieCount = valid.filter(x => Math.abs(x.mean[tgt] - hiV) < 1e-12).length;
-      if (tie) {
+      if (TI.nominal) {
+        // 无序类别：不排序、不比均值，只给各组规模与目标构成
+        const sizes = valid.map(x => `${x.name} n=${x.n}`).join('、');
         F.push({
           tag: '异质性',
-          text: `分成 <b>${sc.k}</b> 组（轮廓 ${(sc.silhouette || 0).toFixed(2)}，分母 ${valid.reduce((a, x) => a + x.n, 0)}）。` +
-            `各组「${esc(tgt)}」均值<b>完全相同</b>（${hiV.toFixed(3)}），没有可以排序的高低。` +
-            `<span class="muted">这通常意味着目标变量是类别编码、或聚类未按目标分层；不要据此比较组间差异。</span>`
+          text: `分成 <b>${sc.k}</b> 组（${sizes}）。` +
+            `目标「${esc(tgt)}」是<b>${TI.label}</b>，<b>不比较各组的目标均值</b>——` +
+            `类别均值取决于编码，没有解释意义。` +
+            `<span class="muted">要看"哪个类别在哪个组更多"，请看下钻样本或做列联表检验（卡方/Fisher）。</span>`
         });
       } else {
-        F.push({
-          tag: '异质性',
-          text: `分成 <b>${sc.k}</b> 组（轮廓 ${(sc.silhouette || 0).toFixed(2)}，分母 ${valid.reduce((a, x) => a + x.n, 0)}）。` +
-            `「${esc(tgt)}」均值最高的是 <b>${esc(hiName)}</b>（${hiV.toFixed(3)}，n=${hi.n}），` +
-            `最低的是 <b>${esc(loName)}</b>（${loV.toFixed(3)}，n=${lo.n}）` +
-            (tieCount > 1 ? `；另有 ${tieCount - 1} 组并列最高` : '') + '。' +
-            `<span class="muted">组间差异说明不宜用单一模型笼统概括。</span>`
-        });
+        const hiV = hi.mean[tgt], loV = lo.mean[tgt];
+        const tie = Math.abs(hiV - loV) < 1e-12;
+        // 并列要如实说：不能把"所有组一样"写成"最高/最低"
+        const tieCount = valid.filter(x => Math.abs(x.mean[tgt] - hiV) < 1e-12).length;
+        if (tie) {
+          F.push({
+            tag: '异质性',
+            text: `分成 <b>${sc.k}</b> 组（轮廓 ${(sc.silhouette || 0).toFixed(2)}，分母 ${valid.reduce((a, x) => a + x.n, 0)}）。` +
+              `各组「${esc(tgt)}」均值<b>完全相同</b>（${hiV.toFixed(3)}），没有可以排序的高低。` +
+              `<span class="muted">这通常意味着目标变量是类别编码、或聚类未按目标分层；不要据此比较组间差异。</span>`
+          });
+        } else {
+          F.push({
+            tag: '异质性',
+            text: `分成 <b>${sc.k}</b> 组（轮廓 ${(sc.silhouette || 0).toFixed(2)}，分母 ${valid.reduce((a, x) => a + x.n, 0)}）。` +
+              `「${esc(tgt)}」均值最高的是 <b>${esc(hiName)}</b>（${hiV.toFixed(3)}，n=${hi.n}），` +
+              `最低的是 <b>${esc(loName)}</b>（${loV.toFixed(3)}，n=${lo.n}）` +
+              (tieCount > 1 ? `；另有 ${tieCount - 1} 组并列最高` : '') + '。' +
+              (TI.ordinal ? `<span class="muted">目标是有序类别，均值差可作参考，但假设了等级间隔相等。</span>`
+                : `<span class="muted">组间差异说明不宜用单一模型笼统概括。</span>`)
+          });
+        }
       }
     }
 
@@ -5353,7 +5437,15 @@ window.__DATASETS__ = {"iris": {"name": "鸢尾花（UCI Iris，150 条）", "de
       });
     }
 
-    if (r.leakFeatures && r.leakFeatures.length) {
+    if (TI.nominal) {
+      F.push({
+        tag: '风险',
+        text: `目标的 Pearson 泄漏筛查<b>不适用</b>（无序类别的编码顺序会改变 r），` +
+          `因此本报告的「疑似特征泄漏」结论对这类目标不计入。` +
+          `<span class="muted">真正的泄漏要结合来源、预测时点和研究任务判断：` +
+          `例如"预测最终成绩却用第二次成绩做输入"，无论相关系数多少都是泄漏。</span>`
+      });
+    } else if (r.leakFeatures && r.leakFeatures.length) {
       F.push({
         tag: '风险',
         text: `<span class="warnline"><b>疑似特征泄漏</b></span>：` +
