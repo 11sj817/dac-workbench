@@ -1,0 +1,402 @@
+{
+  "checkedAt": "2026-11-03T13:59:33.182Z",
+  "version": "6.6.1",
+  "baseline": "74a110529bff7b31b67e5ce530b311268e834fa3",
+  "browser": {
+    "family": "Edge",
+    "route": "exact registered extension instance",
+    "screenshotsUsed": false,
+    "physicalPhone": false,
+    "settingsChanged": false
+  },
+  "finalBuild": {
+    "digest": "f05dc5d49d9d",
+    "time": "2026-11-03T13:55:50Z",
+    "sourceCommit": "19e8dfe587db805781b68361e9ac30ad7e55fa05",
+    "sourceDirty": false,
+    "sourceDirtyScope": "build inputs: workbench/, data/samples.js, build_workbench.py",
+    "note": "sourceCommit 是构建时本地 HEAD；部署提交是推送后生成的新提交，两者不同属正常。"
+  },
+  "publicBaseline": {
+    "digest": "6f50dee7d505",
+    "dataset": "UCI Iris",
+    "rows": 150,
+    "factors": 4,
+    "mainUiSeconds": 0.41,
+    "strict": {
+      "folds": 5,
+      "oofAccuracy": 0.7866666666666666,
+      "balancedAccuracy": 0.7866666666666666,
+      "macroF1Rounded": 0.785,
+      "structuralAuditsPassed": 6
+    },
+    "nested": {
+      "outerFolds": 5,
+      "gridPoints": 4,
+      "accuracy": 0.7866666666666666,
+      "reportedVia": "worker"
+    },
+    "bootstrap": {
+      "task": "KMeans",
+      "successful": 20,
+      "total": 20,
+      "ariRounded": 0.76
+    },
+    "modules": [
+      "calibration",
+      "scenarios",
+      "rules",
+      "correlation network",
+      "BN target category switch",
+      "GLM rejected unordered three-class target"
+    ]
+  },
+  "nativeWorker": {
+    "beforeCancel": {
+      "worker": true,
+      "pending": [
+        "nestedCV"
+      ],
+      "badge": "后台计算中",
+      "cancelVisible": true
+    },
+    "afterCancel": {
+      "worker": false,
+      "pending": 0,
+      "url": null,
+      "badge": "按需启动",
+      "cancelVisible": false
+    },
+    "restartCompleted": true,
+    "restartReportedVia": "worker",
+    "scope": "native object and pending task read through supported read-only CDP; no Worker mock"
+  },
+  "responsive": {
+    "matrix": [
+      {
+        "requested": {
+          "width": 352,
+          "height": 792
+        },
+        "measured": {
+          "actions": [
+            {
+              "clipped": false,
+              "height": 44,
+              "left": 209.27273559570312,
+              "name": "切换深色或浅色主题",
+              "right": 248.7272834777832,
+              "visible": true,
+              "width": 39.45454788208008
+            },
+            {
+              "clipped": false,
+              "height": 44,
+              "left": 253.7272796630859,
+              "name": "打开外观设置",
+              "right": 293.181827545166,
+              "visible": true,
+              "width": 39.45454788208008
+            },
+            {
+              "clipped": false,
+              "height": 44,
+              "left": 12,
+              "name": "上一步",
+              "right": 76,
+              "visible": true,
+              "width": 64
+            },
+            {
+              "clipped": false,
+              "height": 44,
+              "left": 220.7386474609375,
+              "name": "导出报告",
+              "right": 294.1818313598633,
+              "visible": true,
+              "width": 73.44318389892578
+            },
+            {
+              "clipped": false,
+              "height": 0,
+              "left": 0,
+              "name": "取消计算",
+              "right": 0,
+              "visible": false,
+              "width": 0
+            }
+          ],
+          "documentOverflow": false,
+          "documentWidth": 306,
+          "height": 720,
+          "width": 320,
+          "worker": "后台已就绪"
+        }
+      },
+      {
+        "requested": {
+          "width": 429,
+          "height": 928
+        },
+        "measured": {
+          "actions": [
+            {
+              "clipped": false,
+              "height": 44,
+              "left": 279.81817626953125,
+              "name": "切换深色或浅色主题",
+              "right": 319.2727241516113,
+              "visible": true,
+              "width": 39.45454788208008
+            },
+            {
+              "clipped": false,
+              "height": 44,
+              "left": 324.2727355957031,
+              "name": "打开外观设置",
+              "right": 363.7272834777832,
+              "visible": true,
+              "width": 39.45454788208008
+            },
+            {
+              "clipped": false,
+              "height": 44,
+              "left": 12,
+              "name": "上一步",
+              "right": 76,
+              "visible": true,
+              "width": 64
+            },
+            {
+              "clipped": false,
+              "height": 44,
+              "left": 291.2840881347656,
+              "name": "导出报告",
+              "right": 364.7272720336914,
+              "visible": true,
+              "width": 73.44318389892578
+            },
+            {
+              "clipped": false,
+              "height": 0,
+              "left": 0,
+              "name": "取消计算",
+              "right": 0,
+              "visible": false,
+              "width": 0
+            }
+          ],
+          "documentOverflow": false,
+          "documentWidth": 377,
+          "height": 844,
+          "width": 390,
+          "worker": "后台已就绪"
+        }
+      },
+      {
+        "requested": {
+          "width": 845,
+          "height": 792
+        },
+        "measured": {
+          "actions": [
+            {
+              "clipped": false,
+              "height": 33.25,
+              "left": 640,
+              "name": "切换深色或浅色主题",
+              "right": 685.4545478820801,
+              "visible": true,
+              "width": 45.45454788208008
+            },
+            {
+              "clipped": false,
+              "height": 33.25,
+              "left": 693.45458984375,
+              "name": "打开外观设置",
+              "right": 738.9091377258301,
+              "visible": true,
+              "width": 45.45454788208008
+            },
+            {
+              "clipped": false,
+              "height": 44,
+              "left": 16,
+              "name": "上一步",
+              "right": 80.94318389892578,
+              "visible": true,
+              "width": 64.94318389892578
+            },
+            {
+              "clipped": false,
+              "height": 44,
+              "left": 661.4659423828125,
+              "name": "导出报告",
+              "right": 738.9091262817383,
+              "visible": true,
+              "width": 77.44318389892578
+            },
+            {
+              "clipped": false,
+              "height": 0,
+              "left": 0,
+              "name": "取消计算",
+              "right": 0,
+              "visible": false,
+              "width": 0
+            }
+          ],
+          "documentOverflow": false,
+          "documentWidth": 755,
+          "height": 720,
+          "width": 769,
+          "worker": "后台已就绪"
+        }
+      },
+      {
+        "requested": {
+          "width": 1408,
+          "height": 880
+        },
+        "measured": {
+          "actions": [
+            {
+              "clipped": false,
+              "height": 33.25,
+              "left": 1141.272705078125,
+              "name": "切换深色或浅色主题",
+              "right": 1186.727252960205,
+              "visible": true,
+              "width": 45.45454788208008
+            },
+            {
+              "clipped": false,
+              "height": 33.25,
+              "left": 1194.727294921875,
+              "name": "打开外观设置",
+              "right": 1240.181842803955,
+              "visible": true,
+              "width": 45.45454788208008
+            },
+            {
+              "clipped": false,
+              "height": 0,
+              "left": 0,
+              "name": "上一步",
+              "right": 0,
+              "visible": false,
+              "width": 0
+            },
+            {
+              "clipped": false,
+              "height": 0,
+              "left": 0,
+              "name": "导出报告",
+              "right": 0,
+              "visible": false,
+              "width": 0
+            },
+            {
+              "clipped": false,
+              "height": 0,
+              "left": 0,
+              "name": "取消计算",
+              "right": 0,
+              "visible": false,
+              "width": 0
+            }
+          ],
+          "documentOverflow": false,
+          "documentWidth": 1266,
+          "height": 800,
+          "width": 1280,
+          "worker": "后台已就绪"
+        }
+      }
+    ],
+    "finalHeader320": {
+      "actualWidth": 320,
+      "buttons": [
+        {
+          "height": 44,
+          "name": "切换深色或浅色主题",
+          "right": 244.18182373046875,
+          "width": 44
+        },
+        {
+          "height": 44,
+          "name": "打开外观设置",
+          "right": 293.18182373046875,
+          "width": 44
+        }
+      ],
+      "documentWidth": 306
+    },
+    "method": "computed DOM geometry; requested size calibrated to actual per-origin zoom; no screenshots",
+    "noDocumentOverflow": true,
+    "noClippedPrimaryActions": true
+  },
+  "finalCategoricalExplanations": {
+    "profileNoFalseLeak": true,
+    "rulesNoPearsonRank": true
+  },
+  "finalAITheme": {
+    "background": "rgb(244, 247, 251)",
+    "color": "rgb(25, 45, 69)",
+    "light": true
+  },
+  "ai": {
+    "provider": "DeepSeek",
+    "model": "deepseek-flash",
+    "baseURL": "https://api.deepseek.com/v1",
+    "keyRecorded": false,
+    "currentWorkbenchConfigurationOnly": true,
+    "connectionMilliseconds": 2308,
+    "completeReply": "DAC 流式验收通过",
+    "stream": {
+      "status": 200,
+      "mimeType": "text/event-stream",
+      "dataEvents": 10
+    },
+    "stopReturnedToSend": true,
+    "invalidModelStatus": 400,
+    "originalConfigurationRestored": true,
+    "draftPersistenceRegression": "four focused checks passed; live final-build check pending publication"
+  },
+  "downloads": {
+    "formats": 8,
+    "nativeFilesReopened": true,
+    "evidence": "v661-download-checks.json",
+    "downloadEventNotification": "two timeouts; actual files found using native configured download directory"
+  },
+  "focusedBundledTests": {
+    "workspaceGroups": 20,
+    "sourceStabilityChecks": 15,
+    "aiSettingsChecks": 4
+  },
+  "remaining": [
+    {
+      "check": "live file chooser upload and project reopen",
+      "status": "BLOCKED",
+      "reason": "Edge extension fileChooser.setFiles requires Allow access to file URLs; no settings or permissions changed"
+    },
+    {
+      "check": "physical phone touch and screenshot visual review",
+      "status": "NOT_TESTED"
+    },
+    {
+      "check": "other AI providers and browsers",
+      "status": "NOT_TESTED"
+    },
+    {
+      "check": "user business data truth and external validity",
+      "status": "NO_INPUT"
+    }
+  ],
+  "reuse": {
+    "samples": "6.6 official-source reconciliation, unchanged sample values",
+    "statistics": "6.5 171 statsmodels comparisons, not rerun in this patch"
+  },
+  "finalBuildDownloadsStartedAt": "2026-11-03T14:00:06.712Z",
+  "finalBuildConsoleErrors": []
+}

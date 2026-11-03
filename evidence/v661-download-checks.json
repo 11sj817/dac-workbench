@@ -1,0 +1,63 @@
+{
+  "checkedAt": "2026-11-03T14:01:01.337601+00:00",
+  "scope": "Native files saved by the registered Edge tab; no browser download-event receipt",
+  "buildDigest": "f05dc5d49d9d",
+  "files": [
+    {
+      "name": "DAC会话_会话_202611031400.docx",
+      "bytes": 10125,
+      "sha256": "29431e2ca0ba213c05e9736e5187a46245ae9f8d1b418140ebd86f52ce4e13ba",
+      "zip_crc_xml": "PASS"
+    },
+    {
+      "name": "DAC报告_202611031400.docx",
+      "bytes": 9100,
+      "sha256": "ac730495ef1a68c67bf50d0bc14e802970d6200012c81ed72790940a851f040b",
+      "zip_crc_xml": "PASS",
+      "final_build_digest_present": true
+    },
+    {
+      "name": "DAC报告_202611031400.md",
+      "bytes": 10340,
+      "sha256": "36dce8ab272b566efdec2a373733b410006d3b384336a0b4e29cba31f6c68dc2"
+    },
+    {
+      "name": "DAC校准数据_202611031400.csv",
+      "bytes": 3289,
+      "sha256": "eed9507e88b11d0d3e94d60c77c04d37ddd59a34fe8ec9e206fd6534f2de7aff",
+      "csv_rows_including_header": 151
+    },
+    {
+      "name": "DAC校准数据_202611031400.xlsx",
+      "bytes": 5306,
+      "sha256": "ef1f0744d7a099cd05bcfba8aaf9401eea2cc05af572a5491eaf720b8be87341",
+      "zip_crc_xml": "PASS"
+    },
+    {
+      "name": "DAC结果_202611031400.json",
+      "bytes": 82651,
+      "sha256": "bccf6058c7d93e666eb7548558512d27cab4d50824a17f615a5bb394b61f1b08",
+      "json_parse": "PASS"
+    },
+    {
+      "name": "DAC项目_未命名项目_202611031400 (1).json",
+      "bytes": 22679,
+      "sha256": "933756784e77f6c9a5ed9c6cd00f441dd3a43c10d5982cb1765ce59085815218",
+      "json_parse": "PASS",
+      "project_data_rows": 150,
+      "target": "品种编码",
+      "fingerprint": "0055e19d1be7c39d95bee032daa27ca56f1404f6f2acb76474b824f245b7f203",
+      "app_version": "6.6.1"
+    },
+    {
+      "name": "DAC项目_未命名项目_202611031400.json",
+      "bytes": 10969,
+      "sha256": "392dfa099c9186a414ac34cbc323596c13b6751fb44baff4138f44ddceba8672",
+      "json_parse": "PASS",
+      "project_data_rows": 0,
+      "target": "品种编码",
+      "fingerprint": "0055e19d1be7c39d95bee032daa27ca56f1404f6f2acb76474b824f245b7f203",
+      "app_version": "6.6.1"
+    }
+  ]
+}
