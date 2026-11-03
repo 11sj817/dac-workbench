@@ -1,0 +1,80 @@
+{
+  "baseline": "74a110529bff7b31b67e5ce530b311268e834fa3",
+  "candidate": "c0dd7138db7219f3c9bfb88c67c939462f6455a7",
+  "isolatedReverseCheck": "PASS",
+  "recoveredSourceSyntax": "PASS",
+  "files": [
+    {
+      "file": "DAC-Workbench.html",
+      "restoredSha256": "e91c9d198fae8abc7da01e6c64cfe3eaaaf33d5eeb4eef7c8740b4f22ec0ee08"
+    },
+    {
+      "file": "FRONTEND_DESIGN.md",
+      "restoredSha256": "36628018790b82c27e5369785dc06f93eec0d2b6088746c36734f427bfcb6611"
+    },
+    {
+      "file": "LIMITATIONS.md",
+      "restoredSha256": "a0d0b069a2c8312264090431f340efe38fb522fb75efa6df7623fcd12635c0d3"
+    },
+    {
+      "file": "README.md",
+      "restoredSha256": "817e004140daf65d517453b1e4e224b3ba0afa1085a3bef2d9cd9375c3793bd1"
+    },
+    {
+      "file": "RELEASE_NOTES.md",
+      "restoredSha256": "a80406bbea16bdeb9d7c653640c8f3a7e4d54a0c8497e47e443a098e6969c4e3"
+    },
+    {
+      "file": "VALIDATION_V66.md",
+      "restoredSha256": "8b27035b63a9d69782fc3c28b0656c9c4c41d7f7994ac1ce2246853145875cab"
+    },
+    {
+      "file": "VALIDATION_V661.md",
+      "newFileAbsentAfterRollback": true
+    },
+    {
+      "file": "docs/index.html",
+      "restoredSha256": "e91c9d198fae8abc7da01e6c64cfe3eaaaf33d5eeb4eef7c8740b4f22ec0ee08"
+    },
+    {
+      "file": "evidence/v661-browser-acceptance.json",
+      "newFileAbsentAfterRollback": true
+    },
+    {
+      "file": "evidence/v661-download-checks.json",
+      "newFileAbsentAfterRollback": true
+    },
+    {
+      "file": "package-lock.json",
+      "restoredSha256": "b7bc2698ee4962d4fe4bf2a2ece22ce47220c6f2357671ee6661f3341819525c"
+    },
+    {
+      "file": "package.json",
+      "restoredSha256": "bd59ddcc79c6f9f1dbd3343f11589e9edb79612aa45c655c58a88fc63b4c3686"
+    },
+    {
+      "file": "public/index.html",
+      "restoredSha256": "e91c9d198fae8abc7da01e6c64cfe3eaaaf33d5eeb4eef7c8740b4f22ec0ee08"
+    },
+    {
+      "file": "tests/test_ai_settings.js",
+      "newFileAbsentAfterRollback": true
+    },
+    {
+      "file": "tests/test_source_stability.js",
+      "restoredSha256": "45066027e47bcb4b40e72a70bfdc5da372fb4f251d19ffc0c769cdadbd4aae61"
+    },
+    {
+      "file": "tests/test_workspace.js",
+      "restoredSha256": "5d044c75066672c8f4fc5c4bacb56adedf629f6b8a63cc070caaa67f8bf718b8"
+    },
+    {
+      "file": "workbench/index.html",
+      "restoredSha256": "57b94cb96e08f97009bc28dad4d4f5a0c3a8b5ee2e35ce871c6c5e582d6ab5b2"
+    },
+    {
+      "file": "workbench/ui.js",
+      "restoredSha256": "65f70ed8c07b36d02b59d1682c791efaee0193bd0c8238e0f2ac8a95f8b1a966"
+    }
+  ]
+}

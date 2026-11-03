@@ -1,0 +1,59 @@
+{
+  "checkedAt": "2026-11-03T14:08:30.1282873Z",
+  "repository": "11sj817/dac-workbench",
+  "version": "6.6.1",
+  "validatedHead": "c0dd7138db7219f3c9bfb88c67c939462f6455a7",
+  "workflowId": 41649632407,
+  "workflowUrl": "https://github.com/11sj817/dac-workbench/actions/runs/41649632407",
+  "workflowConclusion": "success",
+  "jobs": [
+    {
+      "name": "verify",
+      "conclusion": "success"
+    },
+    {
+      "name": "deploy",
+      "conclusion": "success"
+    }
+  ],
+  "pagesBuildType": "workflow",
+  "site": "https://11sj817.github.io/dac-workbench/",
+  "localSha256": "48d893a51108d6b65e4781db6db2c4bacc994baa20b44667a5ec4c8bc69a9cd6",
+  "publicSha256": "48d893a51108d6b65e4781db6db2c4bacc994baa20b44667a5ec4c8bc69a9cd6",
+  "hashMatch": true,
+  "build": {
+    "digest": "f05dc5d49d9d",
+    "time": "2026-11-03T13:55:50Z",
+    "sourceCommit": "19e8dfe587db805781b68361e9ac30ad7e55fa05",
+    "sourceDirty": false,
+    "sourceDirtyScope": "build inputs: workbench/, data/samples.js, build_workbench.py",
+    "note": "sourceCommit 是构建时本地 HEAD；部署提交是推送后生成的新提交，两者不同属正常。"
+  },
+  "testSuites": 20,
+  "workspaceGroups": 20,
+  "sourceStabilityChecks": 15,
+  "aiSettingsChecks": 4,
+  "realBrowserAcceptance": "evidence/v661-browser-acceptance.json",
+  "nativeDownloadAcceptance": "evidence/v661-download-checks.json",
+  "deployedUiPassed": true,
+  "remaining": [
+    "extension-blocked file upload/project reopen",
+    "physical phone and screenshot visual review",
+    "other AI providers/browsers",
+    "business-data external validation",
+    "final live-browser AI draft recheck after reconnect",
+    "temporary browser viewport reset confirmation after reconnect"
+  ],
+  "baseline": "74a110529bff7b31b67e5ce530b311268e834fa3",
+  "deployedUiBasis": {
+    "method": "byte-identical artifact acceptance reuse",
+    "candidateBrowserRecord": "evidence/v661-browser-acceptance.json",
+    "exactBundleTests": {
+      "workspaceGroups": 20,
+      "sourceStabilityChecks": 15,
+      "aiSettingsChecks": 4
+    },
+    "finalLiveBrowserRecheck": "blocked by unavailable registered connection"
+  },
+  "rollbackEvidence": "evidence/v661-rollback-checks.json"
+}

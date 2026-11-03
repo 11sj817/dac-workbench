@@ -361,7 +361,11 @@
     "stopReturnedToSend": true,
     "invalidModelStatus": 400,
     "originalConfigurationRestored": true,
-    "draftPersistenceRegression": "four focused checks passed; live final-build check pending publication"
+    "draftPersistenceRegression": "four focused checks passed; live final-build check pending publication",
+    "finalPublishedDraftErrorTest": {
+      "status": "NOT_RUN_CONNECTION_UNAVAILABLE",
+      "sourceAndFinalBundleRegression": "PASS"
+    }
   },
   "downloads": {
     "formats": 8,
@@ -398,5 +402,18 @@
     "statistics": "6.5 171 statsmodels comparisons, not rerun in this patch"
   },
   "finalBuildDownloadsStartedAt": "2026-11-03T14:00:06.712Z",
-  "finalBuildConsoleErrors": []
+  "finalBuildConsoleErrors": [],
+  "finalBrowserReconnect": {
+    "checkedAt": "2026-11-03T14:13:25.384238+00:00",
+    "error": "Trusted RPC service is not configured: browser",
+    "readOnlyIsolationAudit": "PASS",
+    "liveConnection": "UNAVAILABLE",
+    "viewportReset": "UNCONFIRMED",
+    "configurationChanged": false
+  },
+  "publicFinalBuild": {
+    "sha256": "48d893a51108d6b65e4781db6db2c4bacc994baa20b44667a5ec4c8bc69a9cd6",
+    "digest": "f05dc5d49d9d",
+    "byteIdenticalToBrowserTestedCandidate": true
+  }
 }
