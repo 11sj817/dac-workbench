@@ -652,8 +652,10 @@
     };
     // 证据登记表：报告/AI/图表共用同一套 metricId
     try { res.evidence = buildEvidence(res); } catch (e) { res.evidence = []; }
-    res.report = C.report(res);
-    // 导出用：正文 + 证据附录；页面渲染用 HTML 版表格（见 renderReport）
+    let appendix = '';
+    try { appendix = reportAppendix(res); } catch (e) { appendix = ''; }
+    res.report = C.report(res) + appendix;
+    // 导出用：正文 + 观察/机制/局限 + 证据附录
     res.reportWithEvidence = res.report + (res.evidence.length ? evidenceMarkdown(res.evidence) : '');
     return res;
   }
@@ -831,6 +833,41 @@
   }
 
   /** 证据表 → Markdown（附在报告末尾） */
+  /** 报告附录：把摘要的观察与机制转成 Markdown（导出时用） */
+  function reportAppendix(r) {
+    const strip = (h) => String(h).replace(/<[^>]+>/g, '').replace(/\*\*/g, '');
+    const F = buildFindings(r);
+    const M = buildMechanism(r);
+    const L = [];
+    L.push('');
+    L.push('## 六、观察');
+    L.push('');
+    F.forEach((x, i) => L.push(`${i + 1}. **${x.tag}**：${strip(x.text)}`));
+    L.push('');
+    L.push('## 七、机制与口径');
+    L.push('');
+    M.forEach((x, i) => L.push(`${i + 1}. **${x.tag}**：${strip(x.text)}`));
+    L.push('');
+    L.push('## 八、局限');
+    L.push('');
+    L.push('- 以上是**相关与条件概率**，不是因果效应；P(Y|X) ≠ P(Y|do(X))。');
+    L.push('- 轮廓系数、ARI、规则频率衡量的是**结构稳定性**，不是监督准确率。');
+    L.push('- 决策树「叶内占比」是训练集内的条件比例，不是置信区间。');
+    L.push('- 特征重要性依赖模型与编码，不是统计显著性，也不是因果贡献。');
+    if (!(S.extra && S.extra.strict)) {
+      L.push('- **严格交叉验证未运行**，本报告的泛化结论仅来自普通 CV（诊断性质）。');
+    }
+    L.push('');
+    L.push('## 九、下一步');
+    L.push('');
+    L.push('1. 跑一次「严格 CV」（每折独立填补/校准/建模），用 OOF 指标替代训练指标。');
+    L.push('2. 若样本存在分组（如同一企业/同一批次），启用分组切分避免同组跨折。');
+    L.push('3. 对关键规则做 Bootstrap 稳定性检验，看规则在重采样下是否复现。');
+    L.push('4. 需要因果结论时，另做识别设计（随机化 / IV / DID / 断点）。');
+    L.push('');
+    return L.join('\n');
+  }
+
   function evidenceMarkdown(list) {
     if (!list || !list.length) return '';
     const L = [];
@@ -850,39 +887,147 @@
   }
 
   /* ---------------- 结论摘要 ---------------- */
-  function updateSummary() {
-    const box = $('#summary');
-    if (!box) return;
-    const r = S.res;
-    if (!r) { box.style.display = 'none'; return; }
-    box.style.display = '';
-    const L = [];
-    if (r.leakFeatures && r.leakFeatures.length) {
-      L.push('<span class="warnline"><b>⚠ 疑似特征泄漏</b>：' +
-        r.leakFeatures.map(x => `${esc(x.name)} 与目标 r=${x.r.toFixed(3)}`).join('、') +
-        ' —— 这些变量几乎等同于目标本身，模型的高准确率是「抄答案」而非真实预测力。' +
-        '请确认它们是否在因果上先于目标发生。</span>');
-    }
-    const prof = r.profile;
+  /* ---------------- 结论解读：观察 + 机制 ----------------
+   * 参考成熟产品的 findings / mechanism 两段式，但避开它们的三个错误：
+   *   1) 分组高低不能取同一个索引
+   *   2) 不能拿恒为常数的指标（如 He）做排名
+   *   3) 每条都要带分母，不能只给百分比
+   * ------------------------------------------------------ */
+
+  /** 观察：这批数据支持什么、不支持什么 */
+  function buildFindings(r) {
+    const F = [];
+    const prof = r.profile, tgt = r.meta.target;
     const miss = prof.columns.reduce((a, c) => a + c.missing, 0);
-    const out = prof.columns.reduce((a, c) => a + (c.outliers || 0), 0);
-    L.push(`<b>${prof.rows}</b> 条样本 / <b>${prof.cols}</b> 个变量；缺失 ${miss} 个、IQR 异常值 ${out} 个。`);
+    const outl = prof.columns.reduce((a, c) => a + (c.outliers || 0), 0);
+
+    F.push({
+      tag: '样本',
+      text: `<b>${prof.rows}</b> 条样本 / <b>${prof.cols}</b> 个变量；` +
+        `进入分析 <b>${r.meta.usedRows}</b> 条（分母 ${prof.rows}）；` +
+        `缺失 ${miss} 个单元格、IQR 异常候选 ${outl} 个。`
+    });
+
+    const corr = r.corr;
+    const corrNames = corr && (corr.columns || corr.names);
+    if (corr && corr.matrix && corrNames) {
+      const idx = corrNames.indexOf(tgt);
+      if (idx >= 0) {
+        const pairs = corrNames
+          .map((n, j) => ({ n, r: corr.matrix[idx][j] }))
+          .filter(x => x.n !== tgt && Number.isFinite(x.r))
+          .sort((a, b) => Math.abs(b.r) - Math.abs(a.r));
+        if (pairs.length) {
+          const top = pairs.slice(0, 3).map(x => `${esc(x.n)}(r=${x.r.toFixed(2)})`).join('、');
+          F.push({
+            tag: '关联',
+            text: `与「${esc(tgt)}」线性关联最强的是 ${top}。` +
+              `<span class="muted">这是相关系数，不是因果效应，也不代表预测价值。</span>`
+          });
+        }
+      }
+    }
 
     const sc = r.scenarios;
-    const ranked = sc.stats.filter(x => x.n > 0).slice().sort((a, b) => b.mean[r.meta.target] - a.mean[r.meta.target]);
-    if (ranked[0]) {
-      const nm = (sc.names && sc.names[sc.stats.indexOf(ranked[0])]) || {};
-      L.push(`分型 k=${sc.k}（轮廓 ${(sc.silhouette || 0).toFixed(2)}）：<b>${ranked[0].name}</b>${nm.tag ? '「' + nm.tag + '」' : ''} 的 ${r.meta.target} 最高（均值 ${ranked[0].mean[r.meta.target].toFixed(3)}）。`);
+    const valid = sc.stats.filter(x => x.n > 0);
+    if (valid.length >= 2) {
+      const sorted = valid.slice().sort((a, b) => b.mean[tgt] - a.mean[tgt]);
+      const hi = sorted[0], lo = sorted[sorted.length - 1];
+      const hiTag = (sc.names && sc.names[sc.stats.indexOf(hi)]) || {};
+      const loTag = (sc.names && sc.names[sc.stats.indexOf(lo)]) || {};
+      const hiName = hiTag.tag ? `${hi.name}「${hiTag.tag}」` : hi.name;
+      const loName = loTag.tag ? `${lo.name}「${loTag.tag}」` : lo.name;
+      F.push({
+        tag: '异质性',
+        text: `分成 <b>${sc.k}</b> 组（轮廓 ${(sc.silhouette || 0).toFixed(2)}，分母 ${valid.reduce((a, x) => a + x.n, 0)}）。` +
+          `「${esc(tgt)}」均值最高的是 <b>${esc(hiName)}</b>（${hi.mean[tgt].toFixed(3)}，n=${hi.n}），` +
+          `最低的是 <b>${esc(loName)}</b>（${lo.mean[tgt].toFixed(3)}，n=${lo.n}）。` +
+          `<span class="muted">组间差异说明不宜用单一模型笼统概括。</span>`
+      });
     }
 
-    const rules = r.tree.rules.slice().sort((a, b) => b.support * b.confidence - a.support * a.confidence);
-    if (rules[0]) {
-      L.push(`最强规则：${rules[0].conditions.map(c => `<code>${c}</code>`).join(' 且 ') || '无分裂'} → <b>${r.meta.target} = ${rules[0].then}</b>（n=${rules[0].support}，置信度 ${(rules[0].confidence * 100).toFixed(1)}%）。`);
-    }
-
-    if (r.tree.cv) {
+    const st = S.extra && S.extra.strict;
+    if (st && st.ok) {
+      F.push({
+        tag: '泛化',
+        text: `严格交叉验证（每折独立填补/校准/建模）：OOF 准确率 <b>${(st.oof.accuracy * 100).toFixed(1)}%</b>` +
+          `（分母 ${st.oof.n}），Balanced ${(st.oof.balancedAccuracy * 100).toFixed(1)}%，` +
+          `训练 ${(st.trainMean * 100).toFixed(1)}% vs 验证 ${(st.mean * 100).toFixed(1)}%（差 ${(st.gap * 100).toFixed(1)} 个百分点）。` +
+          (st.gap > 0.08 ? '<span class="warnline">差距偏大，存在过拟合迹象。</span>' : '')
+      });
+    } else if (r.tree && r.tree.cv) {
       const gap = r.tree.accuracy - r.tree.cv.mean;
-      L.push(`泛化能力：训练 ${(r.tree.accuracy * 100).toFixed(1)}% vs 5 折 CV ${(r.tree.cv.mean * 100).toFixed(1)}%（差 ${(gap * 100).toFixed(1)} 个百分点${gap > 0.08 ? '，<span class="warnline">存在过拟合迹象</span>' : ''}）。`);
+      F.push({
+        tag: '泛化',
+        text: `普通 5 折 CV：训练 ${(r.tree.accuracy * 100).toFixed(1)}% vs 验证 ${(r.tree.cv.mean * 100).toFixed(1)}%` +
+          `（差 ${(gap * 100).toFixed(1)} 个百分点）。` +
+          `<span class="muted">诊断性质的普通 CV，未做折内独立预处理；严格 CV 未运行。</span>`
+      });
+    }
+
+    if (r.leakFeatures && r.leakFeatures.length) {
+      F.push({
+        tag: '风险',
+        text: `<span class="warnline"><b>疑似特征泄漏</b></span>：` +
+          r.leakFeatures.map(x => `${esc(x.name)}(r=${x.r.toFixed(3)})`).join('、') +
+          ' 与目标几乎等同，模型的高准确率是「抄答案」，不是真实预测力。' +
+          '请确认它们在因果上是否先于目标发生。'
+      });
+    } else {
+      F.push({ tag: '风险', text: '未发现 |r|>0.95 的高相关特征。' });
+    }
+
+    return F;
+  }
+
+  /** 机制：具体规则 + 口径（口径不写清楚，别人无法复算） */
+  function buildMechanism(r) {
+    const M = [];
+    const tgt = r.meta.target;
+
+    const rules = (r.tree.rules || []).slice()
+      .sort((a, b) => b.support * b.confidence - a.support * a.confidence);
+    rules.slice(0, 3).forEach(rule => {
+      const share = (rule.support / Math.max(1, r.meta.usedRows) * 100).toFixed(1);
+      M.push({
+        tag: '规则',
+        text: `<b>IF</b> ${rule.conditions.map(c => `<code>${esc(c)}</code>`).join(' 且 ') || '（无分裂）'} ` +
+          `<b>THEN</b> ${esc(tgt)} = <b>${esc(rule.then)}</b>` +
+          `（n=${rule.support}，占 ${share}%，叶内该类占比 ${(rule.confidence * 100).toFixed(1)}%）` +
+          `<span class="muted">——「叶内占比」是训练集内的条件比例，不是置信区间，也不代表未来可靠性。</span>`
+      });
+    });
+
+    if (r.tree.importances && r.tree.importances.length) {
+      const imp = r.tree.importances.slice(0, 4).map(x => `${esc(x.name)} ${(x.value * 100).toFixed(1)}%`).join('、');
+      M.push({
+        tag: '重要性',
+        text: `决策树特征重要性：${imp}。` +
+          `<span class="muted">重要性依赖模型与编码方式，不是因果效应，也不是统计显著性。</span>`
+      });
+    }
+
+    if (r.net) {
+      const deg = (r.net.nodes || []).slice().sort((a, b) => b.degree - a.degree)[0];
+      M.push({
+        tag: '网络',
+        text: `相关网络：|r| ≥ ${r.meta.params.netThreshold} 剪枝后保留 <b>${r.net.edges.length}</b> 条边` +
+          (deg ? `；连接最多的是「${esc(deg.id)}」（度 ${deg.degree}，强度 ${(deg.strength || 0).toFixed(2)}）` : '') +
+          `。<span class="muted">网络是相关结构，边不代表因果方向。</span>`
+      });
+    }
+
+    if (r.bn) {
+      if (r.bnError) {
+        M.push({ tag: 'BN', text: `贝叶斯网络：结构已学出 ${r.bn.edges.length} 条边，但精确推断不可用 —— ${esc(r.bnError)}` });
+      } else {
+        M.push({
+          tag: 'BN',
+          text: `贝叶斯网络：${r.bn.edges.length} 条有向边，联合状态空间 ${r.stateSpace ? r.stateSpace.readable : '?'}` +
+            `（上限 ${r.stateSpace ? r.stateSpace.limit.toLocaleString() : '?'}），可做条件概率与敏感性。` +
+            `<span class="muted">P(Y|X) 是条件概率，不等于干预效应 P(Y|do(X))。</span>`
+        });
+      }
     }
 
     if (r.sens && r.sens.length) {
@@ -890,14 +1035,46 @@
       const scored = r.sens.map(({ f, rows }) => ({
         f, spread: Math.max(...rows.map(x => x.posterior[lv])) - Math.min(...rows.map(x => x.posterior[lv]))
       })).sort((a, b) => b.spread - a.spread);
-      if (scored[0]) {
-        L.push(`条件概率差：固定 <b>${scored[0].f}</b> 在不同等级时，${r.meta.target} 最高档的概率相差 <b>${(scored[0].spread * 100).toFixed(1)}</b> 个百分点。`);
+      if (scored[0] && scored[0].spread > 0) {
+        M.push({
+          tag: '条件概率',
+          text: `在给定网络下，固定「${esc(scored[0].f)}」在不同等级时，` +
+            `${esc(tgt)} 最高档的后验概率相差 <b>${(scored[0].spread * 100).toFixed(1)}</b> 个百分点。` +
+            `<span class="muted">这是条件依赖，不是「某个变量最关键」。</span>`
+        });
       }
     }
 
-    box.innerHTML = `<h4>结论摘要 · 自动生成（数字全部来自本地计算）</h4><ul>${L.map(x => `<li>${x}</li>`).join('')}</ul>`;
+    const prm = r.meta.params;
+    M.push({
+      tag: '口径',
+      text: `云校准：${prm.lowPct}/${prm.highPct} 分位、${prm.levels} 级、${prm.drops} 次云滴；` +
+        `聚类：KMeans++ k=${prm.k}；树：CART(Gini) 深度 ${prm.treeDepth}、最小叶 ${prm.minLeaf}；` +
+        `随机种子 ${prm.seed}。<span class="muted">同参数同种子可复算。</span>`
+    });
 
-    // 证据入口：点开直接看每个数字的出处
+    return M;
+  }
+
+  function updateSummary() {
+    const box = $('#summary');
+    if (!box) return;
+    const r = S.res;
+    if (!r) { box.style.display = 'none'; return; }
+    box.style.display = '';
+
+    const F = buildFindings(r);
+    const M = buildMechanism(r);
+
+    let html = '<h4>结论摘要 · 自动生成（数字全部来自本地计算）</h4>';
+    html += '<div style="font-size:11.5px;color:var(--dim);margin:2px 0 6px">观察 · 这批数据支持什么、不支持什么</div>';
+    html += '<ul>' + F.map(x => `<li><b style="color:var(--acc2)">${x.tag}</b>　${x.text}</li>`).join('') + '</ul>';
+    if (M.length) {
+      html += '<div style="font-size:11.5px;color:var(--dim);margin:10px 0 6px">机制 · 具体规则与计算口径</div>';
+      html += '<ul>' + M.map(x => `<li><b style="color:var(--acc2)">${x.tag}</b>　${x.text}</li>`).join('') + '</ul>';
+    }
+    box.innerHTML = html;
+
     const nEv = (r.evidence || []).length;
     if (nEv) {
       const bar = el('div', { style: 'margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap' });
@@ -2752,6 +2929,65 @@
     return `已设置 · ${k.length} 位 · ****`;
   }
 
+  /** 本地模板回答：AI 不可用时至少给出可用的四段式，而不是空白 */
+  function localTemplateAnswer(r) {
+    if (!r) {
+      return '【结论】当前还没有分析结果，无法给出数据结论。\n' +
+        '【依据】无（主分析未运行）。\n' +
+        '【局限】没有结果就没有依据，任何数字都不能引用。\n' +
+        '【下一步】先导入数据并运行分析，再问这个问题。';
+    }
+    const F = buildFindings(r);
+    const M = buildMechanism(r);
+    const strip = (h) => String(h).replace(/<[^>]+>/g, '');
+    const L = [];
+    L.push('【结论】以下内容完全由本地计算生成，未经模型改写。');
+    L.push('');
+    L.push('【依据】');
+    F.forEach(x => L.push(`· [${x.tag}] ${strip(x.text)}`));
+    L.push('');
+    L.push('【局限】');
+    L.push('· 以上是相关与条件概率，不是因果效应；P(Y|X) ≠ P(Y|do(X))。');
+    L.push('· 稳定性指标（轮廓、ARI、规则频率）不等于监督准确率。');
+    if (!(S.extra && S.extra.strict)) L.push('· 严格交叉验证未运行，泛化能力无法断言。');
+    L.push('');
+    L.push('【下一步】');
+    M.slice(0, 3).forEach(x => L.push(`· [${x.tag}] ${strip(x.text)}`));
+    L.push('· 若要更稳的结论：跑一次严格 CV，或扩大样本后复算。');
+    return L.join('\n');
+  }
+
+  /** 检查模型回答是否满足四段式 */
+  function checkAnswerFormat(text) {
+    const need = ['【结论】', '【依据】', '【局限】', '【下一步】'];
+    const missing = need.filter(k => String(text || '').indexOf(k) < 0);
+    return { ok: missing.length === 0, missing };
+  }
+
+  /**
+   * 带重试的调用。
+   * - 4xx（Key 错、参数错、模型名错）不重试，重试也没用
+   * - 5xx / 超时 / 网络错误重试，退避 800ms → 1600ms
+   */
+  async function callLLMRetry(messages, opt) {
+    const o = Object.assign({ retries: 2, retryDelay: 800 }, opt || {});
+    let lastErr = null;
+    for (let i = 0; i < o.retries; i++) {
+      try {
+        return await callLLM(messages, o);
+      } catch (e) {
+        lastErr = e;
+        const msg = String(e && e.message || '');
+        if (/HTTP 4\d\d/.test(msg)) throw e;                 // 客户端错误，不重试
+        if (/没填 API Key/.test(msg)) throw e;
+        if (i < o.retries - 1) {
+          await new Promise(res => setTimeout(res, o.retryDelay * Math.pow(2, i)));
+        }
+      }
+    }
+    throw lastErr;
+  }
+
   /** 各服务商的输出上限（推理型模型需留足 thinking 预算） */
   const MAX_TOKENS_BY_PROVIDER = {
     deepseek: 4000, zhipu: 4000, openai: 4000,
@@ -3491,18 +3727,30 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
           .concat(hist)
           .concat([{ role: 'user', content: q2 + ctx }]);
         const t0 = performance.now();
-        const r2 = await callLLM(msgs);
+        let r2 = null, degraded = false;
+        try {
+          r2 = await callLLMRetry(msgs, { retries: 2 });
+        } catch (e) {
+          // AI 不可用：退回本地模板，但要说清楚
+          r2 = { content: localTemplateAnswer(r), finishReason: 'local', usage: {} };
+          degraded = true;
+          r2.content = '⚠ AI 调用失败（' + String(e.message).slice(0, 160) + '）\n以下为本地模板结果：\n\n' + r2.content;
+        }
         const txt2 = r2.content;
         const ms = Math.round(performance.now() - t0);
         let bad = [];
         try { bad = r ? (auditNumbers(txt2, r) || []) : []; } catch (e) { bad = []; }
         let refs = [];
         try { refs = matchEvidence(txt2, r && r.evidence); } catch (e) { refs = []; }
-        const meta = `${ms}ms · ` + (bad.length
-          ? `${bad.length} 个数字未在结果中找到：${bad.slice(0, 4).join(', ')}`
-          : '数字溯源通过')
-          + (refs.length ? ` · 引用证据 ${refs.slice(0, 4).map(e => e.id).join('、')}${refs.length > 4 ? ' 等 ' + refs.length + ' 项' : ''}` : '');
-        chat.push({ role: 'assistant', content: txt2, meta, refs: refs.map(e => e.id) });
+        const fmt = checkAnswerFormat(txt2);
+        const parts = [`${ms}ms`];
+        if (degraded) parts.push('本地模板（AI 不可用）');
+        else parts.push(fmt.ok ? '格式完整' : '格式不完整：缺 ' + fmt.missing.join(''));
+        parts.push(bad.length ? `${bad.length} 个数字无出处：${bad.slice(0, 3).join(', ')}` : '数字溯源通过');
+        if (refs.length) parts.push(`引用 ${refs.slice(0, 3).map(e => e.id).join('、')}${refs.length > 3 ? ' 等 ' + refs.length + ' 项' : ''}`);
+        if (r2.finishReason === 'length') parts.push('输出被截断');
+        const meta = parts.join(' · ');
+        chat.push({ role: 'assistant', content: txt2, meta, refs: refs.map(e => e.id), degraded });
       } catch (e) {
         chat.push({ role: 'assistant', content: '⚠ ' + diagnose(e) + '\n' + String(e.message).slice(0, 320), meta: '请求失败' });
       }
