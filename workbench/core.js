@@ -1830,7 +1830,8 @@
   }
 
   /* ---- 情境自动命名：找出偏离总体均值最大的两个变量 ---- */
-  function nameScenarios(stats, factors, target, baseMean) {
+  function nameScenarios(stats, factors, target, baseMean, targetType) {
+    const tType = targetType || 'continuous';
     return stats.map(s => {
       if (!s.n) return { name: s.name, tag: '空簇' };
       const diffs = factors.map(f => {
@@ -1843,8 +1844,17 @@
       const tag = top.length
         ? top.map(d => d.dir + d.f).join('·')
         : '接近总体';
-      const tgtZ = (s.mean[target] - baseMean[target]) / (Math.abs(baseMean[target]) < 1e-9 ? 1 : Math.abs(baseMean[target]));
-      const perf = tgtZ > 0.15 ? '高绩效' : tgtZ < -0.15 ? '低绩效' : '中绩效';
+      // 目标是无序类别时，"高绩效/低绩效"没有意义：编码顺序一变就反了
+      const NOM = ['binary', 'categorical', 'nominal'];
+      const isNomTarget = NOM.indexOf(tType) >= 0;
+      let perf;
+      if (isNomTarget) {
+        perf = '（类别目标，不判高低）';
+      } else {
+        const tgtZ = (s.mean[target] - baseMean[target])
+          / (Math.abs(baseMean[target]) < 1e-9 ? 1 : Math.abs(baseMean[target]));
+        perf = tgtZ > 0.15 ? '高绩效' : tgtZ < -0.15 ? '低绩效' : '中绩效';
+      }
       return { name: s.name, tag, perf };
     });
   }

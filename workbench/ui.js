@@ -630,7 +630,16 @@
     });
     const calY = C.calibrate(yv, params);
     const levels = params.levels;
-    const labels = C.LEVEL_LABELS[levels];
+    // 无序类别不能套「低/中/高」——那等于给类别排了序
+    const _tDet = C.detectTargetType(yv);
+    const _declared = S.dsMeta && S.dsMeta.targetType;
+    const _tType = (_declared && ['nominal','ordinal','binary','continuous','count','categorical'].indexOf(_declared) >= 0)
+      ? _declared : _tDet.type;
+    const _isNom = ['binary','categorical','nominal'].indexOf(_tType) >= 0;
+    // 无序类别用「类别 1/2/3」；有序/连续仍用「低/中/高」
+    const labels = _isNom
+      ? Array.from({ length: levels }, (_, i) => '类别' + (i + 1))
+      : C.LEVEL_LABELS[levels];
 
     // 聚类
     const km = C.kmeans(X, params.k, { seed: params.seed });
@@ -675,7 +684,7 @@
     const baseMean = {};
     factors.forEach((f, k) => { baseMean[f] = C.mean(X.map(r => r[k])); });
     baseMean[target] = C.mean(yv);
-    const scenNames = C.nameScenarios(stats, factors, target, baseMean);
+    const scenNames = C.nameScenarios(stats, factors, target, baseMean, (S.res && S.res.meta && S.res.meta.targetType && S.res.meta.targetType.type) || 'continuous');
 
     // 贝叶斯网络（离散化后的数据）
     const discrete = keep.map((_, i) => factors.map(f => cal[f].codes[i]).concat([calY.codes[i]]));
@@ -2082,7 +2091,10 @@
          <td style="text-align:left"><span class="pill ok">${esc(nm.tag || '-')}</span> <span class="muted">${esc(nm.perf || '')}</span></td>
          <td>${s.n}</td>` +
         S.res.meta.factors.map(f => `<td>${fmt(s.mean[f], 2)}</td>`).join('') +
-        `<td><b>${fmt(s.mean[S.res.meta.target], 3)}</b></td>` }));
+        // 无序类别不显示目标均值：类别均值取决于编码，没有解释意义
+        (tgtInfo(S.res).nominal
+          ? `<td><span class="muted">类别目标<br>不判高低</span></td>`
+          : `<td><b>${fmt(s.mean[S.res.meta.target], 3)}</b></td>`) }));
     });
     tb.appendChild(b);
     pane.appendChild(el('h3', { text: '各情境变量均值', style: 'margin-top:16px' }));
@@ -3985,7 +3997,9 @@ ${JSON.stringify(b, null, 1)}
       const L = r.calibration.labels;
       const lv = r.calibration.target.levels - 1;
       const sc = r.scenarios;
-      const top = sc.stats.filter(x => x.n > 0).slice().sort((a, b) => b.mean[r.meta.target] - a.mean[r.meta.target])[0];
+      const TI2 = tgtInfo(r);
+      const top = TI2.nominal ? null
+        : sc.stats.filter(x => x.n > 0).slice().sort((a, b) => b.mean[r.meta.target] - a.mean[r.meta.target])[0];
       const rules = r.tree.rules.slice().sort((a, b) => b.support * b.confidence - a.support * a.confidence).slice(0, 2);
       const sens = (r.sens || []).map(({ f, rows }) => ({
         f, spread: Math.max(...rows.map(x => x.posterior[lv])) - Math.min(...rows.map(x => x.posterior[lv])),
@@ -3995,7 +4009,9 @@ ${JSON.stringify(b, null, 1)}
 `【1. 数据与分型】
 本次分析使用 ${r.meta.usedRows} 条有效样本，${r.meta.factors.length} 个条件变量，因变量为「${r.meta.target}」。
 按 ${r.meta.params.lowPct}/${r.meta.params.highPct} 分位做云模型校准（${r.meta.params.levels} 级）后，KMeans 将其划分为 ${sc.k} 类情境，轮廓系数 ${(sc.silhouette || 0).toFixed(3)}。
-其中「${top.name}」的 ${r.meta.target} 均值最高，为 ${top.mean[r.meta.target].toFixed(3)}。
+${TI2.nominal
+  ? `目标「${r.meta.target}」是无序类别，不比较各情境的均值高低（编码顺序会改变结论）。`
+  : `其中「${top.name}」的 ${r.meta.target} 均值最高，为 ${top.mean[r.meta.target].toFixed(3)}。`}
 
 【2. 条件组合规则】
 决策树（深度 ${r.meta.params.treeDepth}，5 折交叉验证 ${r.tree.cv ? (r.tree.cv.mean * 100).toFixed(1) : '-'}%）给出 ${r.tree.rules.length} 条规则，其中支持度最高的是：
