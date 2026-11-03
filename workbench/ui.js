@@ -985,15 +985,15 @@
     const M = buildMechanism(r);
     const L = [];
     L.push('');
-    L.push('## 六、观察');
+    L.push('## 七、观察');
     L.push('');
     F.forEach((x, i) => L.push(`${i + 1}. **${x.tag}**：${strip(x.text)}`));
     L.push('');
-    L.push('## 七、机制与口径');
+    L.push('## 八、机制与口径');
     L.push('');
     M.forEach((x, i) => L.push(`${i + 1}. **${x.tag}**：${strip(x.text)}`));
     L.push('');
-    L.push('## 八、局限');
+    L.push('## 九、局限');
     L.push('');
     L.push('- 以上是**相关与条件概率**，不是因果效应；P(Y|X) ≠ P(Y|do(X))。');
     L.push('- 轮廓系数、ARI、规则频率衡量的是**结构稳定性**，不是监督准确率。');
@@ -1003,7 +1003,7 @@
       L.push('- **严格交叉验证未运行**，本报告的泛化结论仅来自普通 CV（诊断性质）。');
     }
     L.push('');
-    L.push('## 九、下一步');
+    L.push('## 十、下一步');
     L.push('');
     L.push('1. 跑一次「严格 CV」（每折独立填补/校准/建模），用 OOF 指标替代训练指标。');
     L.push('2. 若样本存在分组（如同一企业/同一批次），启用分组切分避免同组跨折。');
@@ -3718,6 +3718,41 @@
    * - 5xx / 超时 / 网络错误重试，退避 800ms → 1600ms
    */
   async function callLLMRetry(messages, opt) {
+    const t0 = Date.now();
+    const um = (messages || []).filter(m => m.role === 'user').pop();
+    try {
+      const r = await callLLMRetryCore(messages, opt);
+      aiLogPush({
+        role: 'assistant', ok: true,
+        q: um ? String(um.content).slice(0, 800) : '',
+        a: String((r && r.content) || '').slice(0, 4000),
+        provider: (opt && opt.provider) || (S.ai && S.ai.provider) || '',
+        model: (opt && opt.model) || (S.ai && S.ai.model) || '',
+        ms: Date.now() - t0
+      });
+      return r;
+    } catch (e) {
+      aiLogPush({
+        role: 'assistant', ok: false,
+        q: um ? String(um.content).slice(0, 800) : '',
+        a: '', error: String((e && e.message) || e).slice(0, 600),
+        provider: (opt && opt.provider) || (S.ai && S.ai.provider) || '',
+        model: (opt && opt.model) || (S.ai && S.ai.model) || '',
+        ms: Date.now() - t0
+      });
+      throw e;
+    }
+  }
+
+  /** 记账：AI 对话留痕。失败也记，因为"为什么没答"同样重要。 */
+  function aiLogPush(entry) {
+    if (!S.aiLog) S.aiLog = [];
+    // 同一问一答连成一条；连续两个 assistant 说明是重试
+    S.aiLog.push(Object.assign({ at: new Date().toISOString() }, entry));
+    if (S.aiLog.length > 200) S.aiLog.splice(0, S.aiLog.length - 200);
+  }
+
+  async function callLLMRetryCore(messages, opt) {
     const o = Object.assign({ retries: 2, retryDelay: 800 }, opt || {});
     let lastErr = null;
     let bumped = false;
@@ -4697,6 +4732,115 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
     }
   }
 
+  /**
+   * 会话导出：历史快照 + AI 对话 + 当前分析摘要，一次打包成 DOCX。
+   * 不加后端，全部在浏览器里拼。
+   */
+  async function exportSession() {
+    try {
+      const blocks = [];
+      const now = new Date().toLocaleString('zh-CN');
+      blocks.push({ type: 'h1', text: (S.projectName || 'DAC 分析会话') + ' · 会话记录' });
+      blocks.push({ type: 'p', text: `导出时间：${now}` });
+      blocks.push({ type: 'p', text: `数据集：${S.fileName || (S.sheets ? S.sheets[S.sheetIdx].name : '内置示例')}` });
+      if (S.res && S.res.meta) {
+        blocks.push({ type: 'p', text: `目标：${S.res.meta.target} ← ${S.res.meta.factors.length} 个条件变量，${S.res.meta.usedRows} / ${S.res.meta.rows} 行进入分析` });
+      }
+      if (window.__BUILD__) {
+        blocks.push({ type: 'quote', text: `构建摘要 ${window.__BUILD__.digest} · 源提交 ${String(window.__BUILD__.sourceCommit || '未知').slice(0, 8)}` });
+      }
+      blocks.push({
+        type: 'quote',
+        text: '本文件完全在浏览器本地生成，没有后端服务。文中所有数字来自本地计算，'
+            + '可在页面上一一核对；AI 对话仅包含本会话内你主动发起的请求。'
+      });
+
+      // ---- 1. 当前分析摘要 ----
+      if (S.res) {
+        blocks.push({ type: 'h2', text: '一、当前分析摘要' });
+        const md = S.res.reportWithEvidence || S.res.report || '';
+        // 报告本身有自己的 # / ## 层级；嵌进会话文档时整体降一级，
+        // 否则会出现「一、当前分析摘要」里套「一、数据体检」这种双重编号
+        const shift = (b) => {
+          if (b.type === 'h1') return { type: 'h2', text: b.text };
+          if (b.type === 'h2') return { type: 'h3', text: b.text };
+          if (b.type === 'h3') return { type: 'h3', text: b.text };
+          return b;
+        };
+        mdToDocxBlocks(md).map(shift).forEach(b => blocks.push(b));
+      } else {
+        blocks.push({ type: 'h2', text: '一、当前分析摘要' });
+        blocks.push({ type: 'p', text: '（导出时会话内还没有完成过一次分析）' });
+      }
+
+      // ---- 2. 历史快照 ----
+      blocks.push({ type: 'h2', text: '二、历史运行快照' });
+      const hist = (function () { try { return histLoad(); } catch (e) { return []; } })();
+      if (!hist.length) {
+        blocks.push({ type: 'p', text: '（本浏览器还没有保存过运行记录）' });
+      } else {
+        blocks.push({ type: 'p', text: `共 ${hist.length} 条（最多保留 ${HIST_MAX} 条）。每条只存参数与指标，不含原始数据。` });
+        blocks.push({
+          type: 'table',
+          head: ['时间', '数据集', '目标', 'k', 'CV 准确率', '轮廓', '规则数'],
+          rows: hist.map(h => {
+            const d = new Date(h.at);
+            return [
+              `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`,
+              h.dataset || '-', h.target || '-', h.k == null ? '-' : h.k,
+              h.cv != null ? (h.cv * 100).toFixed(1) + '%' : '-',
+              h.sil != null ? h.sil.toFixed(3) : '-', h.rules == null ? '-' : h.rules
+            ];
+          })
+        });
+      }
+
+      // ---- 3. AI 对话 ----
+      blocks.push({ type: 'h2', text: '三、AI 对话记录' });
+      const log = S.aiLog || [];
+      if (!log.length) {
+        blocks.push({ type: 'p', text: '（本会话内还没有调用过 AI。若只想看本地结论，可用「本地模板」——它不联网，也不会产生任何对话记录。）' });
+      } else {
+        blocks.push({
+          type: 'p',
+          text: `共 ${log.length} 条调用。成功 ${log.filter(x => x.ok).length} 条，失败 ${log.filter(x => !x.ok).length} 条。`
+              + '失败的调用也保留，因为"为什么没答"和"答了什么"同样需要留痕。'
+        });
+        log.forEach((x, i) => {
+          const t = new Date(x.at).toLocaleString('zh-CN');
+          blocks.push({ type: 'h3', text: `第 ${i + 1} 次 · ${t} · ${x.provider || '?'} / ${x.model || '?'} · ${x.ms} ms · ${x.ok ? '成功' : '失败'}` });
+          if (x.q) {
+            blocks.push({ type: 'quote', text: '【提问】' + x.q });
+          }
+          if (x.ok && x.a) {
+            // 正文按段落拆，保留四段式结构
+            String(x.a).split(/\n{2,}/).forEach(p2 => {
+              if (p2.trim()) blocks.push({ type: 'p', text: p2.trim() });
+            });
+          } else if (!x.ok) {
+            blocks.push({ type: 'p', text: '【失败原因】' + (x.error || '未知') });
+          }
+        });
+      }
+
+      // ---- 4. 无后端说明 ----
+      blocks.push({ type: 'h2', text: '四、关于这份文件' });
+      blocks.push({ type: 'p', text: '本工具是纯前端页面：数据不上传，分析在浏览器里算，导出在浏览器里拼。' });
+      blocks.push({ type: 'p', text: '唯一会联网的操作是 AI 问答——你点按钮时，问题会发到你配置的模型服务商。除此之外没有任何外部请求。' });
+      blocks.push({ type: 'p', text: '没有数据库、没有用户账户、没有服务端日志。关闭页面后，除浏览器本地存储的历史快照外，什么都不留。' });
+
+      const buf = await C.toDOCX(blocks, (S.projectName || 'DAC 会话'));
+      const name = (S.projectName || 'DAC会话').replace(/[\\/:*?"<>|]/g, '_');
+      const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+      const a = el('a', { href: URL.createObjectURL(blob), download: `${name}_会话_${stamp()}.docx` });
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+      toast(`会话已导出（${(buf.length / 1024).toFixed(1)} KB，${log.length} 条 AI 调用，${hist.length} 条历史）`, 5000);
+    } catch (e) {
+      toast('导出会话失败：' + e.message, 6000);
+    }
+  }
+
   const bP1 = el('button', { class: 'ghost mini', text: '导出项目 JSON' });
     bP1.onclick = () => exportProject(false);
     const bP2 = el('button', { class: 'ghost mini', text: '导出项目（含数据）' });
@@ -4717,8 +4861,12 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
     bar.appendChild(b1); bar.appendChild(b2); bar.appendChild(b3); bar.appendChild(b4); bar.appendChild(bX);
     const bDocx = el('button', { class: 'ghost mini', text: '导出 Word 报告(.docx)' });
     bDocx.onclick = () => exportDOCX();
+    const bSess = el('button', { class: 'ghost mini', text: '导出会话(.docx)' });
+    bSess.title = '历史快照 + AI 对话 + 当前分析摘要';
+    bSess.onclick = () => exportSession();
     bar.appendChild(bP1); bar.appendChild(bP2); bar.appendChild(bP3); bar.appendChild(b5);
     bar.appendChild(bDocx);
+    bar.appendChild(bSess);
     pane.appendChild(bar);
     pane.appendChild(el('div', { class: 'muted', html:
       `参数快照：分位 ${r.meta.params.lowPct}/${r.meta.params.highPct} · 云滴 ${r.meta.params.drops} · 等级 ${r.meta.params.levels} · k=${r.meta.params.k} · 深度 ${r.meta.params.treeDepth} · 阈值 ${r.meta.params.netThreshold} · 种子 ${r.meta.params.seed}` }));
