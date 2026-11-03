@@ -318,37 +318,11 @@
   }
 
   /** 把表格写成 xlsx（单工作表）。返回 ArrayBuffer。 */
-  async function toXLSX(columns, rows, sheetName) {
-    const name = xmlEsc(sheetName || 'Sheet1');
-    const lines = [];
-    const header = columns.map((c, j) =>
-      `<c r="${colName(j)}1" t="inlineStr"><is><t>${xmlEsc(c)}</t></is></c>`).join('');
-    lines.push(`<row r="1">${header}</row>`);
-    rows.forEach((r, i) => {
-      const cells = r.map((v, j) => {
-        if (v === null || v === undefined || v === '') return '';
-        const ref = colName(j) + (i + 2);
-        if (typeof v === 'number' && Number.isFinite(v)) return `<c r="${ref}"><v>${v}</v></c>`;
-        return `<c r="${ref}" t="inlineStr"><is><t>${xmlEsc(v)}</t></is></c>`;
-      }).join('');
-      lines.push(`<row r="${i + 2}">${cells}</row>`);
-    });
-    const sheetXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${lines.join('')}</sheetData></worksheet>`;
-
-    const files = {
-      '[Content_Types].xml': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`,
-      '_rels/.rels': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`,
-      'xl/workbook.xml': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="${name}" sheetId="1" r:id="rId1"/></sheets></workbook>`,
-      'xl/_rels/workbook.xml.rels': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`,
-      'xl/worksheets/sheet1.xml': sheetXml
-    };
-
-    // 手工拼 zip（store + deflate 均可，这里全用 deflate）
+  /**
+   * 把 [{path: content}] 打成 ZIP（deflate-raw），返回 Uint8Array。
+   * XLSX / DOCX 共用这一套打包逻辑。
+   */
+  async function zipFiles(files) {
     const enc = new TextEncoder();
     const chunks = [];
     const central = [];
@@ -430,6 +404,128 @@
     central.forEach(c => { outBuf.set(c, pos); pos += c.length; });
     outBuf.set(eocd, pos);
     return outBuf;
+  }
+
+  /**
+   * 生成 DOCX（Word 2007+ OOXML），不依赖任何外部库。
+   * 支持的块：
+   *   { type:'h1'|'h2'|'p'|'quote', text }
+   *   { type:'table', head:[...], rows:[[...]] }
+   * 中文字体走 w:eastAsia，避免 Word 回退成西文字体导致方块。
+   */
+  async function toDOCX(blocks, title) {
+    const esc = (v) => String(v === null || v === undefined ? '' : v)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+
+    const RPR = (bold, sz, color) =>
+      '<w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:eastAsia="宋体"/>'
+      + (bold ? '<w:b/>' : '')
+      + (color ? `<w:color w:val="${color}"/>` : '')
+      + `<w:sz w:val="${sz || 21}"/><w:szCs w:val="${sz || 21}"/></w:rPr>`;
+
+    const para = (text, opt) => {
+      const o = opt || {};
+      const style = o.h ? `<w:pStyle w:val="Heading${o.h}"/>` : '';
+      const align = o.align ? `<w:jc w:val="${o.align}"/>` : '';
+      const spacing = o.spacing ? `<w:spacing w:before="${o.spacing[0]}" w:after="${o.spacing[1]}"/>` : '';
+      // 简单处理：按换行拆成多个 run
+      const runs = String(text).split('\n').map((line, i) =>
+        (i ? '<w:br/>' : '') + `<w:r>${RPR(o.bold, o.sz, o.color)}<w:t xml:space="preserve">${esc(line)}</w:t></w:r>`
+      ).join('');
+      // 没有 style 时不要生成空的 <w:pPr>，否则 python-docx 读到 paragraph.style = None
+      const pPr = (style || align || spacing) ? `<w:pPr>${style}${align}${spacing}</w:pPr>` : '';
+      return `<w:p>${pPr}${runs}</w:p>`;
+    };
+
+    const table = (head, rows) => {
+      const cellW = Math.floor(9000 / Math.max(1, head.length));
+      const tcPr = `<w:tcPr><w:tcW w:w="${cellW}" w:type="dxa"/><w:tcBorders>`
+        + '<w:top w:val="single" w:sz="4" w:color="999999"/>'
+        + '<w:left w:val="single" w:sz="4" w:color="999999"/>'
+        + '<w:bottom w:val="single" w:sz="4" w:color="999999"/>'
+        + '<w:right w:val="single" w:sz="4" w:color="999999"/>'
+        + '</w:tcBorders></w:tcPr>';
+      const rowXml = (cells, isHead) => '<w:tr>' + cells.map(c => {
+        const shd = isHead ? '<w:shd w:val="clear" w:fill="F2F5F7"/>' : '';
+        return `<w:tc>${tcPr.replace('</w:tcPr>', shd + '</w:tcPr>')}`
+          + `<w:p><w:pPr><w:spacing w:before="20" w:after="20"/></w:pPr>`
+          + `<w:r>${RPR(isHead, 19)}<w:t xml:space="preserve">${esc(c)}</w:t></w:r></w:p></w:tc>`;
+      }).join('') + '</w:tr>';
+      return '<w:tbl><w:tblPr><w:tblW w:w="9000" w:type="dxa"/></w:tblPr><w:tblGrid>'
+        + head.map(() => `<w:gridCol w:w="${cellW}"/>`).join('')
+        + '</w:tblGrid>' + rowXml(head, true) + rows.map(r => rowXml(r, false)).join('')
+        + '</w:tbl>';
+    };
+
+    const body = (blocks || []).map(b => {
+      switch (b.type) {
+        case 'h1': return para(b.text, { h: 1, bold: true, sz: 32, spacing: [240, 120] });
+        case 'h2': return para(b.text, { h: 2, bold: true, sz: 26, spacing: [200, 100] });
+        case 'h3': return para(b.text, { h: 3, bold: true, sz: 22, spacing: [160, 80] });
+        case 'quote': return para(b.text, { sz: 20, color: '444444', spacing: [60, 60] });
+        case 'table': return table(b.head || [], b.rows || []);
+        default: return para(b.text, { sz: 21, spacing: [40, 80] });
+      }
+    }).join('');
+
+    const docXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body></w:document>`;
+
+    const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:eastAsia="宋体"/><w:sz w:val="21"/><w:szCs w:val="21"/></w:rPr></w:rPrDefault></w:docDefaults>
+<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style>
+<w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/><w:sz w:val="26"/></w:rPr></w:style>
+<w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="heading 3"/><w:pPr><w:outlineLvl w:val="2"/></w:pPr><w:rPr><w:b/><w:sz w:val="22"/></w:rPr></w:style>
+</w:styles>`;
+
+    const files = {
+      '[Content_Types].xml': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>`,
+      '_rels/.rels': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`,
+      'word/_rels/document.xml.rels': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`,
+      'word/document.xml': docXml,
+      'word/styles.xml': stylesXml
+    };
+    return zipFiles(files);
+  }
+
+  async function toXLSX(columns, rows, sheetName) {
+    const name = xmlEsc(sheetName || 'Sheet1');
+    const lines = [];
+    const header = columns.map((c, j) =>
+      `<c r="${colName(j)}1" t="inlineStr"><is><t>${xmlEsc(c)}</t></is></c>`).join('');
+    lines.push(`<row r="1">${header}</row>`);
+    rows.forEach((r, i) => {
+      const cells = r.map((v, j) => {
+        if (v === null || v === undefined || v === '') return '';
+        const ref = colName(j) + (i + 2);
+        if (typeof v === 'number' && Number.isFinite(v)) return `<c r="${ref}"><v>${v}</v></c>`;
+        return `<c r="${ref}" t="inlineStr"><is><t>${xmlEsc(v)}</t></is></c>`;
+      }).join('');
+      lines.push(`<row r="${i + 2}">${cells}</row>`);
+    });
+    const sheetXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${lines.join('')}</sheetData></worksheet>`;
+
+    const files = {
+      '[Content_Types].xml': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`,
+      '_rels/.rels': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`,
+      'xl/workbook.xml': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="${name}" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+      'xl/_rels/workbook.xml.rels': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`,
+      'xl/worksheets/sheet1.xml': sheetXml
+    };
+
+    // 手工拼 zip（store + deflate 均可，这里全用 deflate）
+    return zipFiles(files);
+
   }
 
   /* ---------------- 数据体检 ---------------- */
@@ -1037,11 +1133,28 @@
     });
     L.push(`- **${meta.target}**：分布 ${calibration.target.counts.join('/')}\n`);
     L.push('## 三、异质性情境\n');
-    L.push('| 情境 | 样本 | ' + meta.factors.join(' | ') + ` | ${meta.target} |`);
-    L.push('|' + '---|'.repeat(meta.factors.length + 3));
+    // 目标是无序类别时不能比均值：编码 0/1/2 的"均值"取决于怎么编码
+    const tInfo = (meta && meta.targetType) || {};
+    const tType = tInfo.type || 'continuous';
+    const NOMINAL = ['binary', 'categorical', 'nominal'];
+    const isNominal = NOMINAL.indexOf(tType) >= 0;
+    if (isNominal) {
+      L.push(`目标「${meta.target}」是**无序类别**（${tInfo.levels || '?'} 个类别）。`);
+      L.push('类别编码只是标签，没有大小顺序，因此本表**不给出目标均值**，也不按目标排序。');
+      L.push('要看"哪个类别在哪个情境更多"，请用表格里的样本量做列联表检验（卡方/Fisher），或导出样本下钻。\n');
+    }
+    L.push(isNominal
+      ? ('| 情境 | 样本 | ' + meta.factors.join(' | ') + ' |')
+      : ('| 情境 | 样本 | ' + meta.factors.join(' | ') + ` | ${meta.target} |`));
+    L.push(isNominal
+      ? ('|' + '---|'.repeat(meta.factors.length + 2))
+      : ('|' + '---|'.repeat(meta.factors.length + 3)));
     scenarios.stats.forEach((s, i) => {
       const nm = (scenarios.names && scenarios.names[i]) ? scenarios.names[i].tag : '-';
-      L.push(`| ${s.name}（${nm}） | ${s.n} | ` + meta.factors.map(f => s.mean[f].toFixed(2)).join(' | ') + ` | ${s.mean[meta.target].toFixed(3)} |`);
+      const factorCells = meta.factors.map(f => s.mean[f].toFixed(2)).join(' | ');
+      L.push(isNominal
+        ? `| ${s.name}（${nm}） | ${s.n} | ${factorCells} |`
+        : `| ${s.name}（${nm}） | ${s.n} | ${factorCells} | ${s.mean[meta.target].toFixed(3)} |`);
     });
     L.push('');
     L.push('## 四、组合效应规则\n');
@@ -2056,7 +2169,7 @@
     crossValidate, crossValidateStrict, leakageAudit, stratifiedFolds, groupFolds, evalMetrics,
     weightedMean, weightedQuantile,
     calibrateWith, buildClouds, assignCodes, assignCodesLUT, LUT_MIN_N, detectTargetType, elbowCurve, robustness, nameScenarios,
-    bnLearn, bnInfer, bnSensitivity, bnValidateDag, bnStateSpace, BN_MAX_JOINT, toCSV,
+    zipFiles, toDOCX, bnLearn, bnInfer, bnSensitivity, bnValidateDag, bnStateSpace, BN_MAX_JOINT, toCSV,
     kmeans, silhouette, pca, cart, predictTree, network, report,
     numericCols, isNum, mean, std, quantile, LEVEL_LABELS
   };

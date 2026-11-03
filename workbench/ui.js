@@ -4210,7 +4210,97 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
         toast('Excel 已生成');
       } catch (e) { toast('导出失败：' + e.message, 5000); }
     };
-    const bP1 = el('button', { class: 'ghost mini', text: '导出项目 JSON' });
+    /**
+   * 把 Markdown 报告转成 DOCX blocks。
+   * 只处理报告里实际用到的语法：# 标题、- 列表、| 表格 |、普通段落、**粗体**（去掉标记）。
+   * 复杂语法（嵌套列表、代码块）不处理——报告里本来也没有。
+   */
+  function mdToDocxBlocks(md) {
+    const out = [];
+    const lines = String(md || '').split('\n');
+    let i = 0;
+    const stripInline = (t) => t.replace(/\*\*(.+?)\*\*/g, '$1').replace(/`([^`]+)`/g, '$1');
+
+    while (i < lines.length) {
+      const raw = lines[i];
+      const line = raw.trim();
+      if (!line) { i++; continue; }
+
+      // 表格：以 | 开头且下一行是分隔行
+      if (line.startsWith('|') && lines[i + 1] && /^\|[\s:|-]+\|$/.test(lines[i + 1].trim())) {
+        const splitRow = (r) => r.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => stripInline(c.trim()));
+        const head = splitRow(line);
+        i += 2;
+        const rows = [];
+        while (i < lines.length && lines[i].trim().startsWith('|')) {
+          rows.push(splitRow(lines[i]));
+          i++;
+        }
+        out.push({ type: 'table', head, rows });
+        continue;
+      }
+
+      const h = line.match(/^(#{1,4})\s+(.*)$/);
+      if (h) {
+        const lv = h[1].length;
+        out.push({ type: lv === 1 ? 'h1' : (lv === 2 ? 'h2' : 'h3'), text: stripInline(h[2]) });
+        i++; continue;
+      }
+
+      const li = line.match(/^([-*+]|\d+\.)\s+(.*)$/);
+      if (li) {
+        out.push({ type: 'p', text: '· ' + stripInline(li[2]) });
+        i++; continue;
+      }
+
+      if (line.startsWith('>')) {
+        out.push({ type: 'quote', text: stripInline(line.replace(/^>\s?/, '')) });
+        i++; continue;
+      }
+
+      // 普通段落：合并连续非空、非特殊行
+      let buf = [line];
+      i++;
+      while (i < lines.length) {
+        const nxt = lines[i].trim();
+        if (!nxt || nxt.startsWith('|') || nxt.startsWith('#') || /^([-*+]|\d+\.)\s+/.test(nxt) || nxt.startsWith('>')) break;
+        buf.push(nxt); i++;
+      }
+      out.push({ type: 'p', text: stripInline(buf.join(' ')) });
+    }
+    return out;
+  }
+
+  async function exportDOCX() {
+    const r = S.res;
+    if (!r) { toast('先跑一次分析'); return; }
+    try {
+      const md = r.reportWithEvidence || r.report || '';
+      const blocks = mdToDocxBlocks(md);
+      // 封面信息
+      const cover = [
+        { type: 'h1', text: S.projectName || 'DAC 分析报告' },
+        { type: 'p', text: `数据：${r.meta.target} ← ${r.meta.factors.length} 个变量 · ${r.meta.usedRows} / ${r.meta.rows} 行` },
+        { type: 'p', text: `生成时间：${new Date().toLocaleString('zh-CN')}` }
+      ];
+      if (window.__BUILD__) {
+        cover.push({ type: 'quote', text: `构建摘要 ${window.__BUILD__.digest} · 源提交 ${String(window.__BUILD__.sourceCommit || '未知').slice(0, 8)}` });
+      }
+      cover.push({ type: 'quote', text: '本报告完全在浏览器本地生成，没有后端服务。所有数字来自本地计算，可在页面上一一核对。' });
+
+      const buf = await C.toDOCX(cover.concat(blocks), S.projectName || 'DAC 分析报告');
+      const name = (S.projectName || 'DAC报告').replace(/[\\/:*?"<>|]/g, '_');
+      const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+      const a = el('a', { href: URL.createObjectURL(blob), download: `${name}_${stamp()}.docx` });
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+      toast(`Word 报告已生成（${(buf.length / 1024).toFixed(1)} KB，${blocks.length} 个块）`, 4000);
+    } catch (e) {
+      toast('导出 Word 失败：' + e.message, 6000);
+    }
+  }
+
+  const bP1 = el('button', { class: 'ghost mini', text: '导出项目 JSON' });
     bP1.onclick = () => exportProject(false);
     const bP2 = el('button', { class: 'ghost mini', text: '导出项目（含数据）' });
     bP2.onclick = () => exportProject(true);
@@ -4228,7 +4318,10 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
       else { download('params.json', txt, 'application/json'); }
     };
     bar.appendChild(b1); bar.appendChild(b2); bar.appendChild(b3); bar.appendChild(b4); bar.appendChild(bX);
+    const bDocx = el('button', { class: 'ghost mini', text: '导出 Word 报告(.docx)' });
+    bDocx.onclick = () => exportDOCX();
     bar.appendChild(bP1); bar.appendChild(bP2); bar.appendChild(bP3); bar.appendChild(b5);
+    bar.appendChild(bDocx);
     pane.appendChild(bar);
     pane.appendChild(el('div', { class: 'muted', html:
       `参数快照：分位 ${r.meta.params.lowPct}/${r.meta.params.highPct} · 云滴 ${r.meta.params.drops} · 等级 ${r.meta.params.levels} · k=${r.meta.params.k} · 深度 ${r.meta.params.treeDepth} · 阈值 ${r.meta.params.netThreshold} · 种子 ${r.meta.params.seed}` }));
