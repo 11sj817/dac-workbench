@@ -119,7 +119,16 @@
     }
 
     if (o.method === 'block') {
-      return sampleBlockIndices({ n, B, seed: o.seed, blockType: o.blockType, blockLength: o.blockLength }).indices;
+      // 关键：把 fraction / replacement 传下去。旧实现没传，导致
+      // 「请求 fraction=0.2 无放回」实际抽满 n 且重复，请求参数与实际执行不一致。
+      const r = sampleBlockIndices({
+        n, B, seed: o.seed, blockType: o.blockType, blockLength: o.blockLength,
+        fraction: frac, replacement: repl
+      });
+      r.indices.meta = Object.assign({}, meta, {
+        blockType: r.type, blockLength: r.blockLength, target: r.target
+      });
+      return r.indices;
     }
 
     /* ---------- 工具 ---------- */
@@ -263,7 +272,19 @@
    *  - stationary: 块长服从几何分布（均值 L），P(继续)=1-1/L
    */
   function sampleBlockIndices(o) {
-    const n = o.n, B = o.B, rnd = makeRng(o.seed === undefined ? 42 : o.seed);
+    const n = o.n, B = o.B;
+    const frac = (o.fraction === undefined) ? 1 : Number(o.fraction);
+    if (!(frac > 0 && frac <= 1)) {
+      throw new Error(`块抽样的 fraction 必须在 (0,1]，收到 ${o.fraction}`);
+    }
+    // 块抽样在统计上依赖"有放回地抽整块"；无放回块抽样会破坏块内相关性结构，
+    // 且与 fraction 的组合在文献里没有公认定义 —— 明确拒绝，不能静默抽满 n。
+    if (o.replacement === false && frac < 1) {
+      throw new Error('块抽样不支持「无放回 + fraction<1」：块抽样按有放回抽整块定义，'
+        + '无放回且不足全量会破坏块内相关结构。请改回有放回，或把 fraction 设为 1。');
+    }
+    const target = Math.max(1, Math.round(n * frac));
+    const rnd = makeRng(o.seed === undefined ? 42 : o.seed);
     const L = Math.max(2, Math.min(n, Math.round(o.blockLength || Math.max(2, Math.round(Math.sqrt(n))))));
     const type = o.blockType || 'moving';
     const out = [];
@@ -273,30 +294,30 @@
       for (let b = 0; b < B; b++) {
         const idx = [];
         let cur = Math.floor(rnd() * n);
-        for (let i = 0; i < n; i++) {
+        for (let i = 0; i < target; i++) {
           idx.push(cur);
           if (rnd() < 1 / L) cur = Math.floor(rnd() * n);
           else cur = (cur + 1) % n;
         }
         out.push(idx);
       }
-      return { indices: out, blockLength: L, type };
+      return { indices: out, blockLength: L, type, fraction: frac, target };
     }
 
-    const blockCount = Math.ceil(n / L);
+    const blockCount = Math.ceil(target / L);
     for (let b = 0; b < B; b++) {
       const idx = [];
-      for (let k = 0; k < blockCount && idx.length < n; k++) {
+      for (let k = 0; k < blockCount && idx.length < target; k++) {
         let start;
         if (type === 'circular') start = Math.floor(rnd() * n);
         else start = Math.floor(rnd() * Math.max(1, n - L + 1));   // moving
-        for (let j = 0; j < L && idx.length < n; j++) {
+        for (let j = 0; j < L && idx.length < target; j++) {
           idx.push((start + j) % n);
         }
       }
       out.push(idx);
     }
-    return { indices: out, blockLength: L, type };
+    return { indices: out, blockLength: L, type, fraction: frac, target };
   }
 
   /* ---------------- 内存估算 ---------------- */
@@ -421,6 +442,7 @@
     if (!C) throw new Error('缺少 DACCore');
     const o = Object.assign({
       B: 200, seed: 42, fraction: 1, replacement: true, method: 'iid',
+    lowPct: 25, highPct: 75, targetType: 'continuous',
       task: 'cluster', k: 3, maxDepth: 3, minLeaf: 10, levels: 3, drops: 200,
       confidenceLevel: 0.95, bnThreshold: 0.6
     }, opt || {});
@@ -483,18 +505,35 @@
           const ys = idx.map(i => data.y[i]);
           const im = P ? P.fitImputer(Xs, names, { strategy: o.impute || 'median' }) : null;
           const Xf = im ? P.transformImputer(Xs, im, Xs).matrix : Xs;
+          const loP = (o.lowPct === undefined ? 25 : o.lowPct) / 100;
+          const hiP = (o.highPct === undefined ? 75 : o.highPct) / 100;
           const bounds = names.map((_, j) => {
             const col = Xf.map(r => r[j]).filter(v => Number.isFinite(v)).sort((a, c) => a - c);
             if (!col.length) return { lo: 0, hi: 1 };
             const q = (p) => col[Math.min(col.length - 1, Math.floor(p * (col.length - 1)))];
-            return { lo: q(0.25), hi: q(0.75) };
+            const lo = q(loP), hi = q(hiP);
+            // lo === hi（常量列或高度集中）时给一个极小跨度，避免下游除 0
+            if (!(hi > lo)) return { lo: lo, hi: lo + Math.max(1e-9, Math.abs(lo) * 1e-9) };
+            return { lo, hi };
           });
           const Xc = names.map((_, j) => C.calibrateWith(Xf.map(r => r[j]), bounds[j], { levels: o.levels, drops: o.drops, seed: o.seed + b }).codes);
           const Xcm = Xs.map((_, i) => names.map((_, j) => Xc[j][i]));
-          const ysSorted = [...ys].sort((a, c) => a - c);
+          const ysSorted = [...ys].filter(Number.isFinite).sort((a, c) => a - c);
           const yq = (p) => ysSorted[Math.min(ysSorted.length - 1, Math.floor(p * (ysSorted.length - 1)))];
-          const yB = { lo: yq(0.25), hi: yq(0.75) };
-          const yc = C.calibrateWith(ys, yB, { levels: o.levels, drops: o.drops, seed: o.seed + b }).codes;
+          const yType = o.targetType || 'continuous';
+          let yB = null, yc = null;
+          if (yType === 'binary' || yType === 'categorical') {
+            // 类别目标：不做分位数校准，保持原编码映射到 levels 个等级
+            const uniq = Array.from(new Set(ys.filter(Number.isFinite))).sort((a, c) => a - c);
+            const map = new Map();
+            uniq.forEach((v, i) => map.set(v, Math.min(o.levels - 1, i)));
+            yc = ys.map(v => Number.isFinite(v) ? (map.has(v) ? map.get(v) : 0) : 0);
+          } else {
+            let lo = yq(loP), hi = yq(hiP);
+            if (!(hi > lo)) hi = lo + Math.max(1e-9, Math.abs(lo) * 1e-9);
+            yB = { lo, hi };
+            yc = C.calibrateWith(ys, yB, { levels: o.levels, drops: o.drops, seed: o.seed + b }).codes;
+          }
           const tree = C.cart(Xcm, yc, names, labels, { maxDepth: o.maxDepth, minLeaf: o.minLeaf });
           rec.rules = tree.rules.map(r => Object.assign({ sig: ruleSignature(r) }, r));
           rec.accuracy = tree.accuracy;
@@ -508,7 +547,16 @@
                 C.calibrateWith(XoobImp.map(r => r[j]), bounds[j], { levels: o.levels, drops: o.drops, seed: o.seed + b }).codes);
               const XoobCodes = XoobImp.map((_, i) => names.map((_, j) => XoobCols[j][i]));
               const yOobRaw = oobIdx.map(i => data.y[i]);
-              const yOobCodes = C.calibrateWith(yOobRaw, yB, { levels: o.levels, drops: o.drops, seed: o.seed + b }).codes;
+              let yOobCodes;
+              if (yB === null) {
+                // 类别目标：用训练折建立的映射（与上面 uniq 同源）
+                const uniq = Array.from(new Set(data.y.filter(Number.isFinite))).sort((a, c) => a - c);
+                const map = new Map();
+                uniq.forEach((v, i) => map.set(v, Math.min(o.levels - 1, i)));
+                yOobCodes = yOobRaw.map(v => Number.isFinite(v) ? (map.has(v) ? map.get(v) : 0) : 0);
+              } else {
+                yOobCodes = C.calibrateWith(yOobRaw, yB, { levels: o.levels, drops: o.drops, seed: o.seed + b }).codes;
+              }
               const pred = XoobCodes.map(r => C.predictTree(tree.root, r));
               rec.oob = C.evalMetrics(yOobCodes, pred, o.levels);
             } catch (e2) {
@@ -523,16 +571,31 @@
           const Xs = idx.map(i => data.X[i]);
           const ys = idx.map(i => data.y[i]);
           const allNames = names.concat([data.yName || 'Y']);
+          const loP2 = (o.lowPct === undefined ? 25 : o.lowPct) / 100;
+          const hiP2 = (o.highPct === undefined ? 75 : o.highPct) / 100;
           const bounds = names.map((_, j) => {
             const col = Xs.map(r => r[j]).filter(v => Number.isFinite(v)).sort((a, c) => a - c);
             if (!col.length) return { lo: 0, hi: 1 };
             const q = (p) => col[Math.min(col.length - 1, Math.floor(p * (col.length - 1)))];
-            return { lo: q(0.25), hi: q(0.75) };
+            const lo = q(loP2), hi = q(hiP2);
+            if (!(hi > lo)) return { lo: lo, hi: lo + Math.max(1e-9, Math.abs(lo) * 1e-9) };
+            return { lo, hi };
           });
           const Xc = names.map((_, j) => C.calibrateWith(Xs.map(r => r[j]), bounds[j], { levels: o.levels, drops: o.drops, seed: o.seed + b }).codes);
-          const yS = [...ys].sort((a, c) => a - c);
+          const yS = [...ys].filter(Number.isFinite).sort((a, c) => a - c);
           const yq = (p) => yS[Math.min(yS.length - 1, Math.floor(p * (yS.length - 1)))];
-          const yc = C.calibrateWith(ys, { lo: yq(0.25), hi: yq(0.75) }, { levels: o.levels, drops: o.drops, seed: o.seed + b }).codes;
+          const yType2 = o.targetType || 'continuous';
+          let yc;
+          if (yType2 === 'binary' || yType2 === 'categorical') {
+            const uniq2 = Array.from(new Set(ys.filter(Number.isFinite))).sort((a, c) => a - c);
+            const map2 = new Map();
+            uniq2.forEach((v, i) => map2.set(v, Math.min(o.levels - 1, i)));
+            yc = ys.map(v => Number.isFinite(v) ? (map2.has(v) ? map2.get(v) : 0) : 0);
+          } else {
+            let lo2 = yq(loP2), hi2 = yq(hiP2);
+            if (!(hi2 > lo2)) hi2 = lo2 + Math.max(1e-9, Math.abs(lo2) * 1e-9);
+            yc = C.calibrateWith(ys, { lo: lo2, hi: hi2 }, { levels: o.levels, drops: o.drops, seed: o.seed + b }).codes;
+          }odes;
           const discrete = Xs.map((_, i) => names.map((_, j) => Xc[j][i]).concat([yc[i]]));
           const bn = C.bnLearn(discrete, allNames, o.levels, { maxParents: 2, seed: o.seed + b });
           rec.graph = { edges: bn.edges, nodeNames: allNames };

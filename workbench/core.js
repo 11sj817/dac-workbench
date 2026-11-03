@@ -1665,6 +1665,32 @@
     return false;
   }
 
+  /** 校验结构是否为 DAG；返回 {ok, cycle:[...]} */
+  function bnValidateDag(parents) {
+    const p = parents.length;
+    const color = new Array(p).fill(0); // 0=未访问 1=栈中 2=完成
+    const stack = [];
+    let cycle = null;
+    const dfs = (u) => {
+      if (cycle) return;
+      color[u] = 1;
+      stack.push(u);
+      for (const v of parents[u]) {
+        if (v < 0 || v >= p) { cycle = [u, v]; return; }
+        if (color[v] === 1) {
+          const at = stack.indexOf(v);
+          cycle = stack.slice(at).concat([v]);
+          return;
+        }
+        if (color[v] === 0) { dfs(v); if (cycle) return; }
+      }
+      stack.pop();
+      color[u] = 2;
+    };
+    for (let i = 0; i < p && !cycle; i++) if (color[i] === 0) dfs(i);
+    return { ok: !cycle, cycle: cycle || [] };
+  }
+
   function configIndex(states, row, parentIdx) {
     let idx = 0;
     for (const p of parentIdx) idx = idx * states + row[p];
@@ -1746,6 +1772,11 @@
           if (parents[j].length >= o.maxParents) continue;
           const newI = parents[i].filter(x => x !== j);
           const newJ = parents[j].concat([i]);
+          // 关键：先移除旧边 j→i，再判断 i 是否仍是 j 的祖先。
+          // 若是，则 i→j 会形成 i → … → j → i 的环，必须跳过。
+          const tmp = parents.slice();
+          tmp[i] = newI;
+          if (isAncestor(tmp, i, j)) continue;
           const gain = (scoreOf(i, newI) - localScore[i]) + (scoreOf(j, newJ) - localScore[j]);
           if (gain > bestGain) { bestGain = gain; bestOp = { type: 'rev', i, j }; }
         }
@@ -1760,8 +1791,17 @@
         parents[i] = parents[i].filter(x => x !== j);
         localScore[i] = scoreOf(i, parents[i]);
       } else {
+        const backupI = parents[i].slice();
+        const backupJ = parents[j].slice();
         parents[i] = parents[i].filter(x => x !== j);
         parents[j] = parents[j].concat([i]);
+        // 执行后再验一次：万一将来改动了候选筛选逻辑，这里拦住
+        if (!bnValidateDag(parents).ok) {
+          parents[i] = backupI;
+          parents[j] = backupJ;
+          log.push({ step: it + 1, op: 'rev-rejected', from: names[j], to: names[i], reason: 'would-create-cycle' });
+          break;
+        }
         localScore[i] = scoreOf(i, parents[i]);
         localScore[j] = scoreOf(j, parents[j]);
       }
@@ -1788,13 +1828,19 @@
 
     const edges = [];
     parents.forEach((ps, i) => ps.forEach(j => edges.push({ from: names[j], to: names[i] })));
+    const dag = bnValidateDag(parents);
+    if (!dag.ok) {
+      // 不该发生；真发生了说明搜索逻辑有 bug，宁可报错也不返回可被"信任"的后验
+      throw new Error(`贝叶斯网络结构不是 DAG（环：${dag.cycle.map(k => names[k]).join(' → ')}），已拒绝返回该模型`);
+    }
     return {
       names, levels, parents, cpt, edges,
       score: sum(localScore),
       log,
       converged: !improved,
       iterations: log.length,
-      alpha
+      alpha,
+      dagOk: true
     };
   }
 
@@ -1843,6 +1889,13 @@
   function bnInfer(model, evidence) {
     const { names, levels } = model;
     const n = names.length;
+    // 入口强制校验：结构不是 DAG 就不给后验，避免"归一化后照样给出可信概率"
+    if (model.parents) {
+      const dag = bnValidateDag(model.parents);
+      if (!dag.ok) {
+        throw new Error(`模型结构不是 DAG（环：${dag.cycle.map(k => names[k] || k).join(' → ')}），拒绝推断`);
+      }
+    }
     const total = Math.pow(levels, n);
     if (total > BN_MAX_JOINT) {
       throw new Error(`联合空间 ${total}（变量 ${n} × 状态 ${levels}）超出精确推断上限 ${BN_MAX_JOINT}，请减少变量或降低等级数`);
@@ -1913,7 +1966,7 @@
     crossValidate, crossValidateStrict, leakageAudit, stratifiedFolds, groupFolds, evalMetrics,
     weightedMean, weightedQuantile,
     calibrateWith, buildClouds, assignCodes, assignCodesLUT, LUT_MIN_N, detectTargetType, elbowCurve, robustness, nameScenarios,
-    bnLearn, bnInfer, bnSensitivity, bnStateSpace, BN_MAX_JOINT, toCSV,
+    bnLearn, bnInfer, bnSensitivity, bnValidateDag, bnStateSpace, BN_MAX_JOINT, toCSV,
     kmeans, silhouette, pca, cart, predictTree, network, report,
     numericCols, isNum, mean, std, quantile, LEVEL_LABELS
   };

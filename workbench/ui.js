@@ -651,11 +651,11 @@
       leakFeatures
     };
     // 证据登记表：报告/AI/图表共用同一套 metricId
+    // 注意：这里只做首次生成；严格CV/Bootstrap/GLM 完成后由 refreshDerived() 重算
     try { res.evidence = buildEvidence(res); } catch (e) { res.evidence = []; }
     let appendix = '';
     try { appendix = reportAppendix(res); } catch (e) { appendix = ''; }
     res.report = C.report(res) + appendix;
-    // 导出用：正文 + 观察/机制/局限 + 证据附录
     res.reportWithEvidence = res.report + (res.evidence.length ? evidenceMarkdown(res.evidence) : '');
     return res;
   }
@@ -766,7 +766,7 @@
         note: '主报告应优先引用严格 CV 结果'
       });
     }
-    const st = S.extra && S.extra.strict;
+    const st = RES.strictOk();
     if (st && st.ok) {
       add('strictCV.oofAcc', '严格 CV · OOF 准确率', st.oof.accuracy, {
         digits: 1, unit: '%', stage: '严格CV',
@@ -796,7 +796,7 @@
         unit: ' 轮', stage: '稳定性', denominator: bt.B
       });
       if (bt.summary && bt.summary.cluster) {
-        add('boot.ari', 'Bootstrap ARI 均值', bt.summary.cluster.ariMean, {
+        add('boot.ari', 'Bootstrap ARI 均值', (RES.bootAri(bt) || {}).mean, {
           digits: 3, stage: '稳定性',
           method: '各轮重采样聚类与参考划分的一致性',
           note: '结构稳定性，不是监督准确率，也不是因果概率'
@@ -854,7 +854,7 @@
     L.push('- 轮廓系数、ARI、规则频率衡量的是**结构稳定性**，不是监督准确率。');
     L.push('- 决策树「叶内占比」是训练集内的条件比例，不是置信区间。');
     L.push('- 特征重要性依赖模型与编码，不是统计显著性，也不是因果贡献。');
-    if (!(S.extra && S.extra.strict)) {
+    if (!RES.strictOk()) {
       L.push('- **严格交叉验证未运行**，本报告的泛化结论仅来自普通 CV（诊断性质）。');
     }
     L.push('');
@@ -887,6 +887,85 @@
   }
 
   /* ---------------- 结论摘要 ---------------- */
+  /* ---------------- 结果访问层（单一 schema） ----------------
+   * 每个结果只有一个写入位置、一个读取入口。
+   * 之前 strict 写入 S.extra.quality.strict 却从 S.extra.strict 读，
+   * Bootstrap 写 cluster.ari.mean 却读 cluster.ariMean，导致结果永远显示"未运行"。
+   * ------------------------------------------------------ */
+  const RES = {
+    /** 严格 CV；未运行返回 null，失败返回 {ok:false, reason} */
+    strict() {
+      const q = S.extra && S.extra.quality;
+      return (q && q.strict) ? q.strict : null;
+    },
+    /** 严格 CV 成功且有 OOF 才返回，否则 null */
+    strictOk() {
+      const st = RES.strict();
+      return (st && st.ok && st.oof) ? st : null;
+    },
+    strictState() {
+      const st = RES.strict();
+      if (!st) return 'not-run';
+      if (st.ok) return 'ok';
+      return 'failed';
+    },
+    /** Bootstrap 结果；未运行返回 null */
+    boot() {
+      const b = S.extra && S.extra.boot;
+      return (b && b.result) ? b.result : null;
+    },
+    /** Bootstrap 聚类 ARI —— 兼容 ari:{mean} 与 ariMean 两种历史结构 */
+    bootAri(bt) {
+      const r = bt || RES.boot();
+      if (!r || !r.summary || !r.summary.cluster) return null;
+      const c = r.summary.cluster;
+      if (c.ari && typeof c.ari === 'object' && typeof c.ari.mean === 'number') {
+        return { mean: c.ari.mean, lo: c.ari.lo, hi: c.ari.hi };
+      }
+      if (typeof c.ariMean === 'number') {
+        return { mean: c.ariMean, lo: c.ariLo, hi: c.ariHi };
+      }
+      return null;
+    },
+    /** Bootstrap 规则 OOB */
+    bootOob(bt) {
+      const r = bt || RES.boot();
+      const o = r && r.summary && r.summary.rules && r.summary.rules.oob;
+      return (o && typeof o.accuracy === 'number') ? o : null;
+    },
+    bootFailed(bt) {
+      const r = bt || RES.boot();
+      if (!r) return null;
+      // 兼容 failed / failedCount / failCount
+      const f = (typeof r.failed === 'number') ? r.failed
+        : (typeof r.failedCount === 'number') ? r.failedCount
+          : (typeof r.failCount === 'number') ? r.failCount : null;
+      return f;
+    },
+    /** GLM 结果 */
+    glm() {
+      const g = S.extra && S.extra.glm;
+      return (g && g.ok !== false) ? g : null;
+    }
+  };
+
+  /* ---------------- 派生结果刷新 ----------------
+   * 证据表 / 报告 / 摘要都依赖「当前」的严格CV、Bootstrap、GLM 结果。
+   * 这些是异步完成的，必须重算；否则会看到摘要 78.0% 而证据表写"未运行"。
+   * ------------------------------------------------------ */
+  function refreshDerived() {
+    const r = S.res;
+    if (!r) return;
+    try { r.evidence = buildEvidence(r); } catch (e) { r.evidence = []; }
+    try { r.report = C.report(r) + reportAppendix(r); } catch (e) { /* 报告失败不影响摘要 */ }
+    try {
+      r.reportWithEvidence = r.report + (r.evidence.length ? evidenceMarkdown(r.evidence) : '');
+    } catch (e) { r.reportWithEvidence = r.report; }
+    try { updateSummary(); } catch (e) { }
+    // 若当前在报告页，重渲染以显示最新证据
+    if (S.tab === 'report') { try { renderReport(); } catch (e) { } }
+  }
+
   /* ---------------- 结论解读：观察 + 机制 ----------------
    * 参考成熟产品的 findings / mechanism 两段式，但避开它们的三个错误：
    *   1) 分组高低不能取同一个索引
@@ -946,7 +1025,7 @@
       });
     }
 
-    const st = S.extra && S.extra.strict;
+    const st = RES.strictOk();
     if (st && st.ok) {
       F.push({
         tag: '泛化',
@@ -1502,6 +1581,7 @@
             cv = C.crossValidateStrict(rawX, yv, fnames, C.LEVEL_LABELS[levels], cvOpts, groups);
           }
           q.strict = cv;
+      refreshDerived();
           q.audit = cv.ok ? C.leakageAudit(cv, rawX, fnames) : null;
         } catch (e) {
           q.strict = { ok: false, reason: e.message };
@@ -2341,6 +2421,7 @@
           ? { cells: missCells, rows: missRows, method: '中位数（分类列用众数）' }
           : null;
         q.fit = res;
+      refreshDerived();   // GLM 完成也让证据表/报告同步
         if (family === 'binomial') {
           q.roc = G.roc(yv, res.mu);
           q.cm = G.confusion(yv, res.mu, q.roc.best.thr);
@@ -2638,10 +2719,15 @@
             return th >= 0 ? S.rows.map(r => String(r[th])) : null;
           })()
         };
+        // 校准参数必须从 UI 传下来，不能在引擎里写死 25/75
+        const tgtTypeInfo = (S.res && S.res.meta && S.res.meta.targetType)
+          || C.detectTargetType(S.rows.map(r => r[S.columns.indexOf(S.target)]));
         const opt = {
           task: q.task, B: q.B, seed: q.seed, method: q.method, fraction: q.fraction,
           replacement: q.replacement, k: q.k, maxDepth: q.maxDepth,
           levels: S.params.levels || 3, drops: Math.min(200, S.params.drops || 200),
+          lowPct: S.params.lowPct, highPct: S.params.highPct,
+          targetType: (tgtTypeInfo && tgtTypeInfo.type) || 'continuous',
           bnThreshold: q.threshold, impute: 'median'
         };
         let res;
@@ -2955,7 +3041,7 @@
     L.push('【局限】');
     L.push('· 以上是相关与条件概率，不是因果效应；P(Y|X) ≠ P(Y|do(X))。');
     L.push('· 稳定性指标（轮廓、ARI、规则频率）不等于监督准确率。');
-    if (!(S.extra && S.extra.strict)) L.push('· 严格交叉验证未运行，泛化能力无法断言。');
+    if (!RES.strictOk()) L.push('· 严格交叉验证未运行，泛化能力无法断言。');
     L.push('');
     L.push('【下一步】');
     M.slice(0, 3).forEach(x => L.push(`· [${x.tag}] ${strip(x.text)}`));
@@ -3191,7 +3277,7 @@
     /* ---- 5. 严格交叉验证 ---- */
     L.push('');
     L.push('【严格交叉验证】');
-    const strictCv = S.extra && S.extra.strict;
+    const strictCv = RES.strictOk();
     if (strictCv && strictCv.ok) {
       L.push(`折数：${strictCv.k}；分组：${strictCv.grouped ? '是' : '否'}`);
       L.push(`OOF 准确率：${pct(strictCv.oof.accuracy)}（n=${strictCv.oof.n}）`);
@@ -3220,10 +3306,10 @@
     L.push('【Bootstrap 稳定性】');
     const bt = S.extra && S.extra.boot && S.extra.boot.result;
     if (bt && bt.okCount > 0) {
-      L.push(`方法：${bt.method}${bt.blockType ? '/' + bt.blockType : ''}；B=${bt.B}；成功 ${bt.okCount} 次，失败 ${bt.failCount || 0} 次`);
+      L.push(`方法：${bt.method}${bt.blockType ? '/' + bt.blockType : ''}；B=${bt.B}；成功 ${bt.okCount} 次，失败 ${RES.bootFailed(bt) || 0} 次`);
       if (bt.summary && bt.summary.cluster) {
-        L.push(`ARI 均值 ${f2(bt.summary.cluster.ariMean)}（区间 ${f2(bt.summary.cluster.ariLo)}~${f2(bt.summary.cluster.ariHi)}）`);
-        add('boot.ari', 'Bootstrap ARI 均值', f2(bt.summary.cluster.ariMean), '', '稳定性');
+        L.push(`ARI 均值 ${f2((RES.bootAri(bt) || {}).mean)}（区间 ${f2((RES.bootAri(bt) || {}).lo)}~${f2((RES.bootAri(bt) || {}).hi)}）`);
+        add('boot.ari', 'Bootstrap ARI 均值', f2((RES.bootAri(bt) || {}).mean), '', '稳定性');
       }
       if (bt.summary && bt.summary.rules && bt.summary.rules.oob) {
         const o = bt.summary.rules.oob;
