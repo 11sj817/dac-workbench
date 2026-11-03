@@ -4723,7 +4723,9 @@ window.__DATASETS__ = {"iris": {"name": "鸢尾花（UCI Iris，150 条）", "de
     };
     // 证据登记表：报告/AI/图表共用同一套 metricId
     try { res.evidence = buildEvidence(res); } catch (e) { res.evidence = []; }
-    res.report = C.report(res) + evidenceMarkdown(res.evidence);
+    res.report = C.report(res);
+    // 导出用：正文 + 证据附录；页面渲染用 HTML 版表格（见 renderReport）
+    res.reportWithEvidence = res.report + (res.evidence.length ? evidenceMarkdown(res.evidence) : '');
     return res;
   }
 
@@ -7558,7 +7560,7 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
     pane.innerHTML = '';
     const bar = el('div', { style: 'display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap' });
     const b1 = el('button', { class: 'ghost mini', text: '下载 Markdown' });
-    b1.onclick = () => download(`DAC报告_${stamp()}.md`, r.report, 'text/markdown');
+    b1.onclick = () => download(`DAC报告_${stamp()}.md`, r.reportWithEvidence || r.report, 'text/markdown');
     const b2 = el('button', { class: 'ghost mini', text: '下载 JSON' });
     b2.onclick = () => download(`DAC结果_${stamp()}.json`, JSON.stringify(r, null, 2), 'application/json');
     const b3 = el('button', { class: 'ghost mini', text: '打印 / 存 PDF' });
@@ -7622,7 +7624,65 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
     pane.appendChild(el('div', { class: 'muted', html:
       `参数快照：分位 ${r.meta.params.lowPct}/${r.meta.params.highPct} · 云滴 ${r.meta.params.drops} · 等级 ${r.meta.params.levels} · k=${r.meta.params.k} · 深度 ${r.meta.params.treeDepth} · 阈值 ${r.meta.params.netThreshold} · 种子 ${r.meta.params.seed}` }));
     pane.appendChild(el('pre', { text: r.report }));
+    renderEvidenceTable(pane, r.evidence);
     renderHistory(pane);
+  }
+
+  /* ---------------- 证据表（HTML 版） ---------------- */
+  function renderEvidenceTable(container, list) {
+    if (!list || !list.length) return;
+    const wrap = el('div', { style: 'margin-top:18px' });
+
+    const head = el('div', { style: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px' }, [
+      el('h3', { text: `证据登记表（${list.length} 项）`, style: 'margin:0;font-size:13px' }),
+      el('span', { class: 'muted', style: 'font-size:11.5px',
+        text: '每个数字的出处：分母、评价阶段、计算方法、是否可用' })
+    ]);
+    const bCsv = el('button', { class: 'ghost mini', text: '导出证据 CSV' });
+    bCsv.onclick = () => {
+      const rows = list.map(e => [
+        e.id, e.label, e.formatted, e.denominator === null ? '' : e.denominator,
+        e.stage, e.method || '', e.valid ? '是' : '否', e.note || ''
+      ]);
+      download(`DAC证据_${stamp()}.csv`,
+        '\ufeff' + C.toCSV(['ID', '指标', '值', '分母', '阶段', '方法', '有效', '限制'], rows),
+        'text/csv');
+    };
+    head.appendChild(bCsv);
+    wrap.appendChild(head);
+
+    const tb = el('table', { style: 'font-size:12px' });
+    tb.appendChild(el('thead', { html:
+      '<tr><th style="text-align:left">ID</th><th style="text-align:left">指标</th>' +
+      '<th>值</th><th>分母</th><th>阶段</th><th style="text-align:left">方法</th><th>有效</th></tr>' }));
+    const body = el('tbody');
+    list.forEach(e => {
+      const bad = !e.valid;
+      body.appendChild(el('tr', {
+        title: [e.method, e.note].filter(Boolean).join(' · ') || e.label,
+        style: bad ? 'opacity:.72' : '',
+        html:
+          `<td style="text-align:left"><code style="font-size:11px">${esc(e.id)}</code></td>` +
+          `<td style="text-align:left">${esc(e.label)}</td>` +
+          `<td style="text-align:right;${bad ? 'color:#f5c66b' : ''}">${esc(e.formatted)}</td>` +
+          `<td style="text-align:right">${e.denominator === null ? '—' : esc(String(e.denominator))}</td>` +
+          `<td>${esc(e.stage)}</td>` +
+          `<td style="text-align:left;font-size:11px">${esc(e.method || '—')}</td>` +
+          `<td>${bad ? '<span class="pill bad">否</span>' : '<span class="pill ok">是</span>'}</td>`
+      }));
+    });
+    tb.appendChild(body);
+    wrap.appendChild(tb);
+
+    // 不可用项单列说明
+    const bad = list.filter(e => !e.valid);
+    if (bad.length) {
+      wrap.appendChild(el('div', { class: 'hint', style: 'border-color:#5a4a2a;color:#f5c66b;margin-top:10px', html:
+        `<b>${bad.length} 项不可用</b>：${bad.map(e => `<code>${esc(e.id)}</code>`).join('、')}<br>` +
+        '这些字段存在但结果不可信或未运行，摘要与 AI 上下文里不会给出对应数值。' }));
+    }
+
+    container.appendChild(wrap);
   }
 
   /* ---------------- 历史版本（localStorage） ---------------- */
