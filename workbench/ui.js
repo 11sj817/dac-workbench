@@ -1735,7 +1735,8 @@
       `<b>嵌套验证（外层 ${nr.k} 折 × 网格 ${nr.grid} 点）</b><br>`
       + `嵌套精度（无偏泛化估计） <b>${fmt(nr.nestedAccuracy)}</b> · Balanced ${fmt(nr.nestedBalancedAccuracy)}<br>`
       + `同参数普通 CV <b>${fmt(nr.plainAccuracy)}</b> · Balanced ${fmt(nr.plainBalancedAccuracy)}<br>`
-      + `选参乐观偏差 <b>${pp(nr.optimism)}</b>`
+      + `与固定参数普通 CV 之差 <b>${pp(nr.optimism)}</b>`
+      + `<span class="muted">（为正是因为内层选出了更合适的参数；只有当普通 CV 的参数是"看着结果调的"时，这个数才是乐观偏差）</span>`
       + (nr.paramStability !== null ? `　参数稳定性 <b>${nr.paramStability.toFixed(2)}</b>` : '')
       + (nr._via ? `　<span class="muted">（${nr._via === 'worker' ? '后台线程' : '主线程回退'}）</span>` : '')
       + `<div class="muted" style="margin-top:6px">${esc(nr.note || '')}</div>`

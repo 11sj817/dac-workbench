@@ -1931,15 +1931,20 @@
       // 嵌套 CV 的精度：这是无偏的泛化估计
       nestedAccuracy: meanOuter,
       nestedBalancedAccuracy: meanOuterBal,
-      // 与之对比：用固定参数跑普通 CV 的精度（会偏乐观）
+      // 与之对比：用固定参数跑普通 CV 的精度
       plainAccuracy: outer.oof ? outer.oof.accuracy : null,
       plainBalancedAccuracy: outer.oof ? outer.oof.balancedAccuracy : null,
+      // plain - nested。**只有当 plain 的参数是"看着 CV 结果调出来的"时**，
+      // 这个差才是乐观偏差；若 plain 的参数事先固定、没看过数据，两者都是无偏估计，
+      // 差可以是正也可以是负（内层选出了更合适的参数时就是负的）。
       optimism: (meanOuter !== null && outer.oof)
         ? outer.oof.accuracy - meanOuter : null,
       // 外层切分沿用同一种策略
       splitKind: outer.splitKind,
-      note: '嵌套 CV 的 nestedAccuracy 是无偏泛化估计；plainAccuracy 是固定参数下的普通 CV，'
-          + '若参数是看着 CV 结果调的，plainAccuracy 会偏乐观。两者差 = 选参乐观偏差。'
+      note: 'nestedAccuracy 是无偏泛化估计（外层测试折从不参与选参）。'
+          + 'plainAccuracy 用调用方给的固定参数跑普通 CV：'
+          + '若这些参数是看着 CV 结果调出来的，plainAccuracy 偏乐观，两者之差才是"乐观偏差"；'
+          + '若参数事先固定、没看过数据，两者都是无偏估计，差可以为正也可以为负。'
     };
   }
 
