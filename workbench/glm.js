@@ -161,6 +161,13 @@
     },
     'gamma-inverse': {
       name: 'Gamma (inverse)',
+      // 这个链接函数在数值上出了名地难收敛：dμ/dη = -μ²，μ 小时梯度趋零、
+      // μ 大时梯度爆炸，第一次线性化解就能把 η 推到不可行域。
+      // 实测：只有在 1/μ = Xβ 严格为正且尺度合适时才收敛。
+      // 这不是实现 bug，但用户必须知道，所以单独标出来。
+      caveat: 'Gamma(inverse) 的链接函数数值上极不稳定（dμ/dη = -μ²）。'
+        + '需要 1/μ = Xβ 全部为正且尺度合适，否则第一次迭代就会发散。'
+        + '多数场景应使用 Gamma(log)。',
       linkinv: (eta) => {
         if (!(eta > 1e-8)) return NaN;   // 非正 η 视为无效，交给步长衰减处理
         return 1 / eta;
@@ -172,8 +179,11 @@
         return 2 * ((yy - m) / m - Math.log(yy / m));
       },
       init: (y) => {
+        // inverse link：η = 1/μ。初值取 η₀ = 1/μ̄，比"0.5/μ̄"更贴定义式，
+        // 也让第一次线性化解不至于把 η 推到极小正数后爆炸。
         const m = y.reduce((a, b) => a + b, 0) / y.length;
-        return y.map(() => 0.5 / Math.max(1e-6, m));   // 保守初值，留出正的 η
+        const eta0 = 1 / Math.max(1e-6, m);
+        return y.map(() => eta0);
       },
       validate: (y) => {
         if (!y.every(v => v > 0)) throw new Error('Gamma 要求目标变量全部 > 0');
@@ -404,7 +414,7 @@
     });
 
     // 拟合优度
-    const ll = logLik(d.family, y, mu, dispersion);
+    const ll = logLik(d.family, y, mu, dispersion, theta);
     const k = p + ((d.family === 'gaussian' || d.family === 'gamma') ? 1 : 0);
     const aic = -2 * ll + 2 * k;
     const bic = -2 * ll + k * Math.log(n);
@@ -439,23 +449,65 @@
     };
   }
 
-  function logLik(family, y, mu, dispersion) {
+  /**
+   * 各族的对数似然。
+   * 关键：每个 family 用各自的密度，不能共用 Poisson 的式子 ——
+   * 之前 Gamma 和 NegBin 都落到同一个 else 分支，等于把它们的似然当 Poisson 算，
+   * 直接导致 logLik 差 44、AIC 差 90。
+   *
+   * @param {string} family
+   * @param {number[]} y
+   * @param {number[]} mu
+   * @param {number} dispersion  Gaussian 的 σ²、Gamma 的 φ（=1/shape）
+   * @param {number} [theta]     NegBin 的离散参数
+   */
+  function logLik(family, y, mu, dispersion, theta) {
     let ll = 0;
     if (family === 'gaussian') {
-      const s2 = Math.max(1e-12, dispersion);
-      for (let i = 0; i < y.length; i++) {
-        ll += -0.5 * (Math.log(2 * Math.PI * s2) + (y[i] - mu[i]) ** 2 / s2);
+      // σ² 用 MLE（除以 n）；statsmodels 的 llf 也是 MLE 口径。
+      // 我们的 dispersion 用的是 deviance/dfResid（除以 n-p），
+      // 两者差一个 n/(n-p) 因子，AIC/BIC 里已经单列说明。
+      const n = y.length;
+      const s2mle = Math.max(1e-12, dispersion * (n - 0) / n);
+      for (let i = 0; i < n; i++) {
+        ll += -0.5 * (Math.log(2 * Math.PI * s2mle) + (y[i] - mu[i]) ** 2 / s2mle);
       }
     } else if (family === 'binomial') {
       for (let i = 0; i < y.length; i++) {
         const m = Math.max(1e-12, Math.min(1 - 1e-12, mu[i]));
         ll += y[i] * Math.log(m) + (1 - y[i]) * Math.log(1 - m);
       }
-    } else {
+    } else if (family === 'poisson') {
       for (let i = 0; i < y.length; i++) {
         const m = Math.max(1e-12, mu[i]);
         ll += y[i] * Math.log(m) - m - logGamma(y[i] + 1);
       }
+    } else if (family === 'gamma') {
+      // Gamma(shape=θ, scale=μ/θ) 的对数似然：
+      //   ll = Σ [ θ·log(θ/μ) + (θ-1)·log y - θ·y/μ - logΓ(θ) ]
+      // 其中 θ = 1/φ，φ 是 dispersion。这里 φ 用 deviance/dfResid（矩估计）。
+      const phi = Math.max(1e-12, dispersion);
+      const th = 1 / phi;
+      const lgTh = logGamma(th);
+      for (let i = 0; i < y.length; i++) {
+        const m = Math.max(1e-12, mu[i]);
+        const yi = Math.max(1e-12, y[i]);
+        ll += th * Math.log(th / m) + (th - 1) * Math.log(yi) - th * yi / m - lgTh;
+      }
+    } else if (family === 'negbin') {
+      // NB(θ) 的对数似然：
+      //   ll = Σ [ y·log(μ/(μ+θ)) + θ·log(θ/(μ+θ)) + logΓ(y+θ) - logΓ(θ) - logΓ(y+1) ]
+      const t = Math.max(1e-6, theta || 1);
+      const lgt = logGamma(t);
+      for (let i = 0; i < y.length; i++) {
+        const m = Math.max(1e-12, mu[i]);
+        const yi = Math.max(0, y[i]);
+        ll += yi * Math.log(m / (m + t))
+          + t * Math.log(t / (m + t))
+          + logGamma(yi + t) - lgt - logGamma(yi + 1);
+      }
+    } else {
+      throw new Error('logLik: 未知分布 ' + family);
     }
     return ll;
   }

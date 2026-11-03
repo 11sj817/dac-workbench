@@ -2701,6 +2701,14 @@
       types[c] = C.detectTargetType(S.rows.map(r => r[j]));
     });
 
+    /* 分布本身的数值风险（例如 Gamma inverse 的固有病态） */
+    if (q.family && C.FAMILIES && C.FAMILIES[q.family] && C.FAMILIES[q.family].caveat) {
+      const cb = el('div', { class: 'hint', style: 'margin:8px 0;border-color:#5a4a1a' });
+      cb.innerHTML = '<b>⚠ ' + esc(C.FAMILIES[q.family].name) + ' 的数值风险</b>：'
+        + esc(C.FAMILIES[q.family].caveat);
+      pane.appendChild(cb);
+    }
+
     /* 适用性提示：先把"能不能这么算"说清楚，再让人算 */
     if (S.res && S.res.meta && S.res.meta.target) {
       const tt = types[S.res.meta.target];
