@@ -1491,6 +1491,7 @@
     // 2) 目标变量离散化：先在全量有效样本上算一次"类别标签"仅用于分层；
     //    真正的分位数在每折内部用训练集重算（见下）。这里的分层只依据类别比例，
     //    属于允许的"先验设计"，不参与任何数值计算。
+    const validRowsSet = new Set(validRows);
     const yvRaw = validRows.map(i => yRaw[i]);
 
     // 目标变量类型：离散目标不再用云模型校准（否则 0/1 会被分位数切成"等级"，类别定义被篡改）
@@ -1515,11 +1516,27 @@
       : calibrate(yvRaw, { lowPct: o.lowPct, highPct: o.highPct, drops: 50, levels: o.levels, seed: o.seed });
     const stratLabel = rough.codes;   // 仅用于分层，不参与任何数值计算
 
-    // 3) 切分：给了 groups 就先按组分块，保证同组不跨折
+    // 3) 切分。三种方式，优先级：时间 > 分组 > 分层随机
+    //    时间切分：按时间列排序后顺序切成 K 段，第 f 段做验证、之前的段做训练。
+    //             这才是"用过去预测未来"，随机切分在有趋势的数据上会严重乐观。
+    //    分组切分：同一个组（如同一家医院/同一个用户）的样本必须全在同一侧。
     let folds;
-    if (groups && groups.length === yRaw.length) {
+    let splitKind = 'stratified';
+    if (o.timeOrder && o.timeOrder.length === yRaw.length) {
+      // timeOrder 是原始行下标按时间升序排好的序列
+      const ordered = o.timeOrder.filter(i => validRowsSet.has(i));
+      const K = Math.max(2, Math.min(o.k, Math.floor(ordered.length / 10) || 2));
+      folds = [];
+      for (let f = 0; f < K; f++) {
+        const a = Math.floor(f * ordered.length / K);
+        const b = Math.floor((f + 1) * ordered.length / K);
+        folds.push(ordered.slice(a, b).map(i => validRows.indexOf(i)));
+      }
+      splitKind = 'time';
+    } else if (groups && groups.length === yRaw.length) {
       const gv = validRows.map(i => groups[i]);
       folds = groupFolds(gv, Math.max(2, o.k), o.seed);
+      splitKind = 'group';
     } else {
       folds = stratifiedFolds(stratLabel, Math.max(2, o.k), o.seed);
     }
@@ -1544,7 +1561,16 @@
       if (testIdx.length < 2) continue;
       const testSet = new Set(testIdx);
       const trainIdx = [];
-      for (let i = 0; i < X.length; i++) if (!testSet.has(i)) trainIdx.push(i);
+      if (splitKind === 'time') {
+        // 只允许用比当前折更早的样本训练，绝不使用未来数据
+        const minTest = Math.min(...testIdx);
+        for (let i = 0; i < X.length; i++) if (i < minTest && !testSet.has(i)) trainIdx.push(i);
+        if (trainIdx.length < 15) { perFold.push({ fold: f + 1, ok: false, reason: `训练段仅 ${trainIdx.length} 条，时间切分无法进行` }); continue; }
+      } else {
+        // 分层/分组：除测试集以外的样本都能当训练集
+        for (let i = 0; i < X.length; i++) if (!testSet.has(i)) trainIdx.push(i);
+      }
+      if (!trainIdx.length) { perFold.push({ fold: f + 1, ok: false, reason: '训练集为空' }); continue; }
 
       const Xtr = trainIdx.map(i => X[i].slice());
       const Xte = testIdx.map(i => X[i].slice());
@@ -1656,7 +1682,32 @@
       targetLevels: yLevels,
       nLevels,
       perFold,
-      oof: { accuracy: oofM.accuracy, balancedAccuracy: oofM.balancedAccuracy, macroF1: oofM.macroF1, perClass: oofM.perClass, confusion: oofM.confusion, n: oofM.n },
+      oof: {
+        accuracy: oofM.accuracy,
+        balancedAccuracy: oofM.balancedAccuracy,
+        macroF1: oofM.macroF1,
+        perClass: oofM.perClass,
+        confusion: oofM.confusion,
+        n: oofM.n,
+        // 可按 rowId 追回每条样本的预测 —— 光给指标没法复核
+        rowId: validRows.map(i => (o.rowIds && o.rowIds[i] !== undefined) ? o.rowIds[i] : (i + 1)),
+        pred: oofPred.slice(),
+        true: oofTrue.slice(),
+        // 多数类基线：分类问题里"永远猜最多的那一类"能拿多少
+        // 没有这个数，看不出模型到底比瞎猜强多少
+        baseline: (function () {
+          const cnt = new Array(nLevels).fill(0);
+          oofTrue.forEach(v => { if (v >= 0 && v < nLevels) cnt[v]++; });
+          const tot = cnt.reduce((a, b) => a + b, 0);
+          if (!tot) return null;
+          const maj = cnt.indexOf(Math.max(...cnt));
+          const acc = Math.max(...cnt) / tot;
+          // 多数类基线的 Balanced Accuracy = (1/K_active) —— 只有最多那类召回 1，其余 0
+          const active = cnt.filter(v => v > 0).length;
+          return { majorityClass: maj, accuracy: acc, balancedAccuracy: active ? 1 / active : 0, n: tot };
+        })()
+      },
+      splitKind,
       mean: mean(testAcc) || 0,
       std: std(testAcc) || 0,
       trainMean: mean(perFold.map(f => f.trainAccuracy)) || 0,

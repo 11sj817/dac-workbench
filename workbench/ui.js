@@ -1871,6 +1871,33 @@
           };
           const gCol = names.find(n => S.roles[n] === 'group');
           const groups = gCol ? WR.map(r2 => r2[names.indexOf(gCol)]) : null;
+
+          // 时间切分：找了 time 角色列就按它排序，交给 crossValidateStrict 顺序切段
+          const tCol = names.find(n => S.roles[n] === 'time');
+          let timeOrder = null;
+          if (tCol) {
+            const ti = names.indexOf(tCol);
+            const idxAll = WR.map((_, i) => i);
+            const val = i => {
+              const v = WR[i][ti];
+              const num = typeof v === 'number' ? v : Date.parse(v);
+              return Number.isFinite(num) ? num : NaN;
+            };
+            const okAll = idxAll.filter(i => Number.isFinite(val(i)));
+            // 时间列有缺失就明确说，不静默丢弃
+            if (okAll.length < idxAll.length) {
+              toast(`时间列「${tCol}」有 ${idxAll.length - okAll.length} 行无法解析，这些行不参与时间切分`, 6000);
+            }
+            if (okAll.length >= 20) timeOrder = okAll.sort((a, b) => val(a) - val(b));
+          }
+          cvOpts.timeOrder = (timeOrder && WR === S.rows) ? timeOrder : null;
+
+          // OOF 追回 rowId：只有 WR 就是原始行表时才可靠
+          cvOpts.rowIds = (WR === S.rows && S.res && S.res.meta && S.res.meta.rowIds)
+            ? S.res.meta.rowIds
+            : null;
+          cvOpts.targetType = (S.res && S.res.meta && S.res.meta.targetType && S.res.meta.targetType.type) || undefined;
+          cvOpts.targetLevels = (S.res && S.res.meta && S.res.meta.targetType && S.res.meta.targetType.levelValues) || undefined;
           let cv;
           try {
             cv = await WK.run('strictCV',
