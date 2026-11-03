@@ -201,6 +201,63 @@
   }));
   $('#drop').addEventListener('drop', e => { const f = e.dataTransfer.files[0]; if (f) loadFile(f); });
 
+  /* ---------------- 导入预览（CSV） ----------------
+   * 分隔符猜错会把整行读成一列，且错得"看起来正常"。
+   * 所以先给预览 + 可覆盖，再让用户确认。
+   * ------------------------------------------------- */
+  function showImportPreview(file, text, parsed, forcedDelim) {
+    const box = $('#dsInfo');
+    if (!box) { applyData(parsed, file.name); return; }
+    const m = parsed.meta || {};
+    const DELIMS = [['自动', ''], ['逗号 ,', ','], ['分号 ;', ';'], ['Tab', '	'], ['竖线 |', '|']];
+    const sel = DELIMS.map(([label, v]) =>
+      `<option value="${v === '	' ? 'TAB' : v}"${((forcedDelim || '') === v) ? ' selected' : ''}>${label}</option>`
+    ).join('');
+
+    const head = parsed.columns.slice(0, 8);
+    const rowsHtml = parsed.rows.slice(0, 5).map(r =>
+      '<tr>' + r.slice(0, 8).map(v => `<td>${v === null ? '<span class="muted">∅</span>' : esc(String(v)).slice(0, 24)}</td>`).join('') + '</tr>'
+    ).join('');
+
+    box.innerHTML = `
+      <div style="border:1px solid var(--line);border-radius:6px;padding:10px;margin-top:8px">
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+          <b>导入预览</b>
+          <span class="muted">${esc(file.name)} · ${m.dataRows || parsed.rows.length} 行 × ${parsed.columns.length} 列</span>
+          <label class="muted" style="font-size:11.5px">分隔符
+            <select id="impDelim" style="font-size:11.5px;padding:2px 4px">${sel}</select>
+          </label>
+          <span class="muted" style="font-size:11.5px">实际用：<b style="color:var(--acc2)">${({ ',': '逗号 ,', ';': '分号 ;', '\t': 'Tab', '|': '竖线 |' })[parsed.meta.delimiter] || parsed.meta.delimiter}</b></span>
+        </div>
+        ${(m.widthMismatch ? `<div class="hint" style="border-color:#5a4a1a;color:#f5c66b;margin-bottom:6px">
+          ⚠ ${m.widthMismatch} 行的列数与表头不一致（已按表头宽度补齐/截断）</div>` : '')}
+        ${(m.skippedBlank ? `<div class="muted" style="font-size:11.5px;margin-bottom:6px">跳过 ${m.skippedBlank} 个空行</div>` : '')}
+        <div style="overflow-x:auto;max-height:170px;overflow-y:auto">
+          <table style="font-size:11.5px"><thead><tr>${head.map(h => `<th style="text-align:left">${esc(h)}</th>`).join('')}</tr></thead>
+          <tbody>${rowsHtml}</tbody></table>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:10px">
+          <button class="primary" id="impOk" style="padding:5px 12px">确认导入</button>
+          <button class="ghost mini" id="impCancel">取消</button>
+        </div>
+      </div>`;
+
+    const selEl = $('#impDelim');
+    selEl.onchange = () => {
+      const v = selEl.value === 'TAB' ? '	' : selEl.value;
+      const re = C.parseCSV(text, v ? { delimiter: v } : undefined);
+      showImportPreview(file, text, re, v);
+    };
+    $('#impOk').onclick = () => {
+      S.fileName = file.name;
+      applyData(parsed, file.name);
+      // 把解析元信息挂到会话上，便于后续追溯
+      S.importMeta = { file: file.name, delimiter: parsed.meta.delimiter, widthMismatch: parsed.meta.widthMismatch, skippedBlank: parsed.meta.skippedBlank, rowIds: parsed.meta.rowIds };
+      toast(`已导入 ${parsed.rows.length} 行（分隔符 ${JSON.stringify(parsed.meta.delimiter)}）`);
+    };
+    $('#impCancel').onclick = () => { box.textContent = '已取消导入'; };
+  }
+
   async function loadFile(file) {
     const ext = (file.name.split('.').pop() || '').toLowerCase();
     $('#dsInfo').textContent = '解析中…';
@@ -209,6 +266,9 @@
       if (ext === 'csv' || ext === 'txt') {
         const text = await file.text();
         parsed = C.parseCSV(text);
+        // 先给预览，用户确认后再进分析
+        showImportPreview(file, text, parsed, '');
+        return;
       } else if (ext === 'xlsx' || ext === 'xls') {
         if (ext === 'xls') throw new Error('旧版 .xls 请另存为 .xlsx 或 .csv');
         const buf = await file.arrayBuffer();

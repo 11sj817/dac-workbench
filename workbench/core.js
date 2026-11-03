@@ -43,8 +43,64 @@
   }
 
   /* ---------------- CSV 解析 ---------------- */
-  function parseCSV(text) {
+  /**
+   * 猜测分隔符：只看引号外的字符，统计前若干行里各候选出现次数的「稳定性」。
+   * 返回出现次数最一致且 >=1 的那个；都不像就退回逗号。
+   */
+  function detectDelimiter(text, sampleLines) {
+    const cands = [',', ';', '\t', '|'];
+    const maxLine = sampleLines || 12;
+    const stats = {};
+    cands.forEach(c => { stats[c] = []; });
+
+    let line = 0, inQ = false;
+    const counts = { ',': 0, ';': 0, '\t': 0, '|': 0 };
+    for (let i = 0; i < text.length && line < maxLine; i++) {
+      const ch = text[i];
+      if (inQ) {
+        if (ch === '"') {
+          if (text[i + 1] === '"') i++;
+          else inQ = false;
+        }
+        continue;
+      }
+      if (ch === '"') { inQ = true; continue; }
+      if (ch === '\n') {
+        cands.forEach(c => stats[c].push(counts[c]));
+        cands.forEach(c => { counts[c] = 0; });
+        line++;
+        continue;
+      }
+      if (cands.indexOf(ch) >= 0) counts[ch]++;
+    }
+    if (line < maxLine) cands.forEach(c => stats[c].push(counts[c]));
+
+    // 一致性：非空行里出现次数相同最多的那个
+    let best = ',', bestScore = -1;
+    cands.forEach(c => {
+      const arr = stats[c].filter(n => n > 0 || true);
+      if (!arr.length) return;
+      const mean = arr.reduce((a, b) => a + b, 0) / arr.length;
+      if (mean < 1) return;                       // 根本没出现
+      const sd = Math.sqrt(arr.reduce((a, b) => a + (b - mean) * (b - mean), 0) / arr.length);
+      const score = mean - sd * 2;                // 出现得多且稳定
+      if (score > bestScore) { bestScore = score; best = c; }
+    });
+    return best;
+  }
+
+  /**
+   * 解析分隔文本。
+   * @param {string} text
+   * @param {object} [opt] { delimiter: ',', keepRowId: true }
+   * @returns {{columns, rows, meta}}
+   *   meta = { delimiter, dataRows, skippedBlank, widthMismatch, rowIds }
+   */
+  function parseCSV(text, opt) {
+    const o = opt || {};
     if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+    const delim = o.delimiter || detectDelimiter(text);
+
     const rows = [];
     let row = [], field = '', inQ = false;
     for (let i = 0; i < text.length; i++) {
@@ -56,23 +112,46 @@
         } else field += c;
       } else {
         if (c === '"') inQ = true;
-        else if (c === ',') { row.push(field); field = ''; }
+        else if (c === delim) { row.push(field); field = ''; }
         else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
         else if (c === '\r') { /* skip */ }
         else field += c;
       }
     }
     if (field.length || row.length) { row.push(field); rows.push(row); }
+
     const clean = rows.filter(r => r.length && r.some(v => String(v).trim() !== ''));
-    if (!clean.length) return { columns: [], rows: [] };
+    const skippedBlank = rows.length - clean.length;
+    if (!clean.length) {
+      return { columns: [], rows: [], meta: { delimiter: delim, dataRows: 0, skippedBlank, widthMismatch: 0, rowIds: [] } };
+    }
+
     const columns = clean[0].map((h, i) => (String(h).trim() || '列' + (i + 1)));
-    const data = clean.slice(1).map(r => r.map(v => {
-      const s = String(v).trim();
-      if (s === '') return null;
-      const n = Number(s);
-      return Number.isFinite(n) && s !== '' ? n : s;
-    }));
-    return { columns, rows: data };
+    const width = columns.length;
+    let widthMismatch = 0;
+
+    const data = [];
+    const rowIds = [];
+    clean.slice(1).forEach((r, k) => {
+      if (r.length !== width) widthMismatch++;
+      // 行宽不齐时补齐/截断，而不是静默错位
+      const cells = r.length === width ? r
+        : (r.length < width ? r.concat(new Array(width - r.length).fill(''))
+          : r.slice(0, width));
+      data.push(cells.map(v => {
+        const str = String(v).trim();
+        if (str === '') return null;
+        const n = Number(str);
+        return Number.isFinite(n) ? n : str;
+      }));
+      // 稳定 rowId：原始数据行号（1-based，不含表头，跳过的空行不占号）
+      rowIds.push(k + 1);
+    });
+
+    return {
+      columns, rows: data,
+      meta: { delimiter: delim, dataRows: data.length, skippedBlank, widthMismatch, rowIds }
+    };
   }
 
   /* ---------------- ZIP / XLSX 解析 ---------------- */
@@ -1962,7 +2041,7 @@
   }
 
   global.DACCore = {
-    parseCSV, parseXLSX, parseXLSXAll, toXLSX, profile, corrMatrix, calibrate, pearson, robustScale,
+    parseCSV, detectDelimiter, parseXLSX, parseXLSXAll, toXLSX, profile, corrMatrix, calibrate, pearson, robustScale,
     crossValidate, crossValidateStrict, leakageAudit, stratifiedFolds, groupFolds, evalMetrics,
     weightedMean, weightedQuantile,
     calibrateWith, buildClouds, assignCodes, assignCodesLUT, LUT_MIN_N, detectTargetType, elbowCurve, robustness, nameScenarios,
