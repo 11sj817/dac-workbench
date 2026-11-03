@@ -221,7 +221,12 @@ svg{max-width:100%;height:auto;display:block}
   body{font-size:16px}.method-grid{grid-template-columns:1fr}
   .method-card p{font-size:13px}.method-card h4{font-size:14px}.method-card small{font-size:11px}
   .welcome-lead>p{font-size:14px}.workspace-heading p{font-size:13px}
-  .statusbar{padding-bottom:env(safe-area-inset-bottom);height:calc(34px + env(safe-area-inset-bottom))}.statusbar button{min-height:24px}
+  body{padding-bottom:calc(62px + env(safe-area-inset-bottom))}
+  .app-header button{min-width:44px}
+  .statusbar{padding-bottom:env(safe-area-inset-bottom);height:calc(50px + env(safe-area-inset-bottom))}
+  .statusbar .sb-text{flex:1;min-width:0;max-width:none}
+  .statusbar button{min-height:44px;flex-shrink:0}
+  .toast{bottom:calc(66px + env(safe-area-inset-bottom))}
 }
 @media print{header,#tabs,.config-column,.workspace-heading,.resultbar,.statusbar,.toast,.result-heading{display:none!important}.wrap{display:block;margin:0;padding:0}.result-column>.card{border:0;padding:0;box-shadow:none}body{background:#fff;color:#111;padding:0}pre{max-height:none}}
 </style>
@@ -361,7 +366,7 @@ svg{max-width:100%;height:auto;display:block}
         <span class="nav-section">辅助工具</span>
         <button data-icon="✧" data-tab="ai">AI 助手</button>
         <button data-icon="↗" data-tab="report">导出报告</button>
-        <div class="nav-footer">V6.6 · RESEARCH BETA</div>
+        <div class="nav-footer">V6.6.1 · RESEARCH BETA</div>
       </nav>
       <div class="result-heading"><div><h2 id="paneTitle">开始一次分析</h2><p id="paneDescription">从研究问题出发，逐步建立分析依据。</p></div><span class="tag" id="analysisState">准备数据</span></div>
       <section class="evidence-strip" aria-label="数据与验证状态">

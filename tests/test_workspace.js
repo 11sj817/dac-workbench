@@ -76,6 +76,15 @@ function check(name,f){f();pass++;console.log('PASS '+name);}
   assert.equal($('#panel-4').style.display,'');
   assert.equal($('#paneTitle').textContent,'数据体检');
  });
+ check('nominal targets are not ranked or flagged as leaking from Pearson label codes',()=>{
+  assert.ok(!$('#pane').textContent.includes('疑似特征泄漏'));
+  assert.ok($('#pane').textContent.includes('不使用 Pearson'));
+  tab('rules');
+  assert.ok($('#pane').textContent.includes('不适用（类别标签）'));
+  assert.ok(!$('#pane').textContent.includes('与 y 的 Pearson r'));
+  tab('net');
+  assert.ok($('#pane').textContent.includes('会随编码顺序改变'));
+ });
  for(const name of ['calib','scene','rules','net','bn','robust','ai','report'])tab(name);
  check('all result pages render without JavaScript errors',()=>assert.deepEqual(errors,[]));
  tab('report');

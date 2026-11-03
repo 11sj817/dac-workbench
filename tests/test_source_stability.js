@@ -57,11 +57,31 @@ async function until(f){for(let i=0;i<600&&!f();i++)await pause(10);assert.ok(f(
  });
  const wk=w.__WK;
  const active=wk.ensure();
+ const firstTask=wk.run('nestedCV',{}), firstId=wk.seq;
+ const secondTask=wk.run('bootstrapKmeans',{}), secondId=wk.seq;
+ check('all background tasks expose cancellation and actual busy state',()=>{
+  assert.equal($('#sb-worker').textContent,'后台计算中');
+  assert.equal($('#sb-cancel').style.display,'');
+ });
+ active.onmessage({data:{id:firstId,status:'done',result:{ok:true}}});
+ await firstTask;
+ check('finishing one queued task keeps cancellation available for the other',()=>{
+  assert.equal($('#sb-cancel').style.display,'');
+  assert.equal($('#sb-worker').textContent,'后台计算中');
+ });
+ active.onmessage({data:{id:secondId,status:'done',result:{ok:true}}});
+ await secondTask;
+ check('idle worker is ready and cancellation is hidden after every task completes',()=>{
+  assert.equal($('#sb-worker').textContent,'后台已就绪');
+  assert.equal($('#sb-cancel').style.display,'none');
+ });
  const timeout=wk.run('unresponsive',{}, {timeoutMs:15}).then(()=>null,e=>e);
  const timeoutError=await timeout;
  check('timeout terminates worker, rejects pending task and revokes URL',()=>{
   assert.match(timeoutError.message,/超时/);assert.equal(active.terminated,true);
   assert.equal(wk.pending.size,0);assert.equal(wk.worker,null);assert.equal(wk.url,null);assert.ok(revoked.length);
+  assert.equal($('#sb-worker').textContent,'按需启动');
+  assert.equal($('#sb-cancel').style.display,'none');
  });
  const second=wk.ensure();
  const cancel=wk.run('cancelled',{}).catch(e=>e);

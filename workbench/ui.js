@@ -43,6 +43,18 @@
     supported: typeof Worker !== 'undefined' && !!window.__WORKER_SRC__,
     fallbackNotified: false,
 
+    syncUI() {
+      const running = this.pending.size > 0;
+      const badge = document.getElementById('sb-worker');
+      if (badge) {
+        badge.textContent = !this.supported ? '主线程回退'
+          : running ? '后台计算中' : this.worker ? '后台已就绪' : '按需启动';
+        badge.style.color = this.supported ? '' : 'var(--warn)';
+      }
+      const cancel = document.getElementById('sb-cancel');
+      if (cancel) cancel.style.display = running ? '' : 'none';
+    },
+
     ensure() {
       if (this.worker) return this.worker;
       if (!this.supported) return null;
@@ -52,10 +64,12 @@
         this.worker = new Worker(this.url);
         this.worker.onmessage = ev => this._onMsg(ev.data);
         this.worker.onerror = e => this.cancelAll('Worker 崩溃: ' + (e.message || 'unknown'));
+        this.syncUI();
         return this.worker;
       } catch (e) {
         if (this.url) { URL.revokeObjectURL(this.url); this.url = null; }
         this.supported = false;
+        this.syncUI();
         return null;
       }
     },
@@ -68,6 +82,7 @@
       if (m.status === 'progress') { if (t.onProgress) t.onProgress(m.progress); return; }
       clearTimeout(t.timer);
       this.pending.delete(m.id);
+      this.syncUI();
       if (m.status === 'done') t.resolve(m.result);
       else if (m.status === 'error') t.reject(new Error(m.error || '计算失败'));
     },
@@ -95,6 +110,7 @@
           this.cancelAll('计算超时（' + ((o.timeoutMs || 120000) / 1000) + 's），已中断');
         }, o.timeoutMs || 120000);
         this.pending.set(id, { resolve, reject, timer, onProgress: o.onProgress, task });
+        this.syncUI();
         try { w.postMessage({ id, task, payload }); }
         catch (e) { this.cancelAll('任务发送失败：' + e.message); }
       });
@@ -105,8 +121,7 @@
       this.pending.clear();
       if (this.worker) { this.worker.terminate(); this.worker = null; }
       if (this.url) { URL.revokeObjectURL(this.url); this.url = null; }
-      const badge = document.getElementById('sb-worker');
-      if (badge) badge.textContent = this.supported ? '按需启动' : '主线程回退';
+      this.syncUI();
     }
   };
   window.__WK = WK;   // 调试用
@@ -1969,7 +1984,10 @@
       }
     }
 
-    if (S.res && S.res.leakFeatures && S.res.leakFeatures.length) {
+    if (S.res && tgtInfo(S.res).nominal) {
+      pane.appendChild(el('div', { class: 'hint', text:
+        '目标为类别标签，不使用 Pearson 相关筛查特征泄漏；请结合数据来源、预测时点及业务含义检查。' }));
+    } else if (S.res && S.res.leakFeatures && S.res.leakFeatures.length) {
       pane.appendChild(el('div', { class: 'hint', style: 'border-color:#5a2020;color:#fca5a5;margin-top:12px',
         html: '<b>疑似特征泄漏</b>：' + S.res.leakFeatures.map(x => `<code>${esc(x.name)}</code>（r=${x.r.toFixed(3)}）`).join('、') +
           '<br>这些变量与目标几乎线性相关，可能是目标的另一种度量（如「第一次成绩」预测「最终成绩」）。' +
@@ -2259,8 +2277,6 @@
       btnRun.disabled = true;
       btnRun.textContent = '计算中…';
       setBusy(true, '严格交叉验证计算中…');
-      const cancelBtn = document.getElementById('sb-cancel');
-      if (cancelBtn) cancelBtn.style.display = '';
       try {
           const target = S.target || names[names.length - 1];
           const idxT = names.indexOf(target);
@@ -2300,8 +2316,6 @@
           q.strict = { ok: false, reason: e.message };
           q.audit = null;
         }
-        const cb2 = document.getElementById('sb-cancel');
-        if (cb2) cb2.style.display = 'none';
         setBusy(false, '就绪');
         btnRun.disabled = false;
         btnRun.textContent = '运行严格 CV + 泄漏审计';
@@ -2765,21 +2779,24 @@
 
     pane.appendChild(el('h3', { text: '变量重要性（Gini 下降）', style: 'margin-top:16px' }));
     t.importances.forEach(im => {
-      pane.appendChild(el('div', { class: 'row', html: `<span>${im.name}</span><b>${pct(im.value)}</b>` }));
+      pane.appendChild(el('div', { class: 'row', html: `<span>${esc(im.name)}</span><b>${pct(im.value)}</b>` }));
       pane.appendChild(el('div', { class: 'bar' }, [el('i', { style: `width:${Math.max(2, im.value * 100)}%` })]));
     });
 
-    pane.appendChild(el('h3', { text: '单因素相关（对照）', style: 'margin-top:18px' }));
+    const nominal = tgtInfo(S.res).nominal;
+    pane.appendChild(el('h3', { text: nominal ? '变量对照（类别目标）' : '单因素相关（对照）', style: 'margin-top:18px' }));
     const tb = el('table');
-    tb.appendChild(el('thead', { html: '<tr><th>变量</th><th>与 y 的 Pearson r</th><th>树中重要性</th></tr>' }));
+    tb.appendChild(el('thead', { html: `<tr><th>变量</th><th>${nominal ? '相关系数适用性' : '与 y 的 Pearson r'}</th><th>树中重要性</th></tr>` }));
     const b = el('tbody');
     S.res.meta.factors.forEach(f => {
       const imp = (t.importances.find(i => i.name === f) || { value: 0 }).value;
-      b.appendChild(el('tr', { html: `<td>${f}</td><td>${fmt(t.single[f], 3)}</td><td>${pct(imp)}</td>` }));
+      b.appendChild(el('tr', { html: `<td>${esc(f)}</td><td>${nominal ? '不适用（类别标签）' : fmt(t.single[f], 3)}</td><td>${pct(imp)}</td>` }));
     });
     tb.appendChild(b); pane.appendChild(tb);
     pane.appendChild(el('div', { class: 'muted', style: 'margin-top:6px',
-      text: '若某变量 r 很弱但重要性很高，说明它是"组合条件"起作用的——这正是单因素分析会漏掉的。' }));
+      text: nominal
+        ? '类别编码的顺序不表示数量关系，不用 Pearson r 给条件变量排序；Gini 重要性也不构成因果效应。'
+        : '相关系数与树中重要性差异较大，提示可能存在非线性或交互，仍需进一步检验。' }));
 
     pane.appendChild(el('h3', { text: `条件组合规则（${t.rules.length} 条，按支持度排序）`, style: 'margin-top:18px' }));
     const rules = t.rules.slice().sort((a, b2) => b2.support * b2.confidence - a.support * a.confidence);
@@ -2798,6 +2815,8 @@
   function renderNet() {
     const pane = $('#pane'), net = S.res.net;
     pane.innerHTML = '';
+    if (tgtInfo(S.res).nominal) pane.appendChild(el('div', { class: 'hint', text:
+      '目标为类别标签：涉及目标编码的 Pearson 边会随编码顺序改变，不能据此解释类别关系。可使用贝叶斯网络或列联表分析。' }));
     if (!net.nodes.length) { pane.innerHTML = '<div class="muted">没有满足阈值的边，把阈值调低一点。</div>'; return; }
     pane.appendChild(el('div', { class: 'muted', html:
       `|r| ≥ ${net.threshold} 剪枝后保留 <b>${net.edges.length}</b> 条边。<b>点击节点</b>可高亮它的连线。` }));
@@ -3942,7 +3961,10 @@
     // DeepSeek 这类服务商会在 400 里直接告诉你能用哪些模型
     if (/\b400\b/.test(m) && /model/i.test(m)) {
       const sup = /supported API model names are ([^.)]+)/i.exec(m);
-      if (sup) return `模型名不对。该服务商实际支持：<code>${esc(sup[1].replace(/,\s*/g, '</code> <code>'))}</code> —— 改成其中之一即可（点「获取可用模型」可自动列出）。`;
+      if (sup) {
+        const models = sup[1].split(/,\s*/).filter(name => !/^but\b/i.test(name.trim()));
+        return `模型名不对。该服务商实际支持：${models.join('、')}。改成其中之一即可（点「获取」可查询模型列表）。`;
+      }
       return '模型名不被接受（400）。点「获取可用模型」看服务商实际提供哪些。';
     }
     if (/\b403\b/.test(m)) return 'Key 没有该模型权限，或地区受限（403）。';
@@ -4128,12 +4150,12 @@
    * 返回 { content, reasoning, finishReason, usage, requestId, warnings }
    */
   async function callLLM(messages, opt) {
-    const c = aiCfg();
+    const o = opt || {};
+    const c = o.config || aiCfg();
     if (!c.key) throw new Error('还没填 API Key（在「接入设置」里填）');
     const prov = c.provider || 'deepseek';
     const base = (c.baseURL || PROVIDERS[prov].base).replace(/\/+$/, '');
     const model = c.model || PROVIDERS[prov].model;
-    const o = opt || {};
     const maxTokens = o.maxTokens || MAX_TOKENS_BY_PROVIDER[prov] || 3000;
 
     const ctrl = new AbortController();
@@ -4516,7 +4538,7 @@
       text: (cfgReady ? '接入设置（已配置 ' + esc(cfg.model || 'default') + ' · 点击展开修改）'
                       : '接入设置（还没填 Key，点这里配置）')
     }));
-    const box = el('div', { class: 'card', style: 'margin-top:8px;background:#0f1a24' });
+    const box = el('div', { class: 'card', style: 'margin-top:8px;background:var(--panel2)' });
     box.appendChild(el('h3', { text: '接入设置（存在浏览器本地，不上传）', style: 'margin-bottom:10px;font-size:12px' }));
     const grid = el('div', { style: 'display:grid;grid-template-columns:1fr 1fr;gap:8px' });
     const selP = el('select', {});
@@ -4610,22 +4632,24 @@
       testOut.style.display = '';
       testOut.className = 'testout';
       testOut.innerHTML = '正在请求…';
-      aiSave({ provider: selP.value, baseURL: inBase.value.trim(), model: inModel.value.trim(),
-               key: inKey.value.trim(), persist: persistChk.checked });
       const t0 = performance.now();
       try {
-        const r0 = await callLLM([{ role: 'user', content: '只回复两个字：可用' }], { maxTokens: 200 });
+        const r0 = await callLLM([{ role: 'user', content: '只回复两个字：可用' }], {
+          maxTokens: 200,
+          config: { provider: selP.value, baseURL: inBase.value.trim(),
+            model: inModel.value.trim(), key: inKey.value.trim() }
+        });
         const txt = r0.content;
         const ms = Math.round(performance.now() - t0);
         testOut.style.borderColor = '#1f4a3c';
         testOut.className = 'testout ok';
-    testOut.innerHTML = `<b style="color:#34d399">连接成功</b> · 延迟 ${ms}ms · 模型 ${inModel.value || '(默认)'}<br>
-          <span class="muted">返回：${(txt || '').slice(0, 60)}</span>`;
+    testOut.innerHTML = `<b style="color:var(--ok)">连接成功</b> · 延迟 ${ms}ms · 模型 ${esc(inModel.value || '(默认)')}<br>
+          <span class="muted">返回：${esc((txt || '').slice(0, 60))}</span>`;
       } catch (e) {
         testOut.style.borderColor = '#5a2020';
         testOut.className = 'testout bad';
-      testOut.innerHTML = `<b style="color:#ef4444">连接失败</b><br>${diagnose(e)}<br>
-          <span class="muted" style="word-break:break-all">${String(e.message).slice(0, 200)}</span>`;
+      testOut.innerHTML = `<b style="color:var(--bad)">连接失败</b><br>${esc(diagnose(e))}<br>
+          <span class="muted" style="word-break:break-all">${esc(String(e.message).slice(0, 200))}</span>`;
       }
       bTest.disabled = false;
       bTest.textContent = '测试连接';
@@ -4633,6 +4657,7 @@
     saveRow.appendChild(bSave); saveRow.appendChild(bTest); saveRow.appendChild(bClear);
     if (cfg.key) saveRow.appendChild(el('span', { class: 'chip', text: maskKey(cfg.key) }));
     box.appendChild(saveRow);
+    box.appendChild(el('div', { class: 'muted', text: '测试连接仅使用当前输入；确认可用后，点击「保存设置」应用。' }));
     box.appendChild(persistRow);
     box.appendChild(riskHint);
     box.appendChild(testOut);
@@ -5716,7 +5741,7 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
       name: (S.projectName || '未命名项目'),
       createdAt: new Date().toISOString(),
       app: {
-        name: 'DAC Workbench', version: '6.6.0', algo: 'v6.5',
+        name: 'DAC Workbench', version: '6.6.1', algo: 'v6.5',
         // 源提交与部署提交要能区分：构建时由 build 脚本注入
         buildDigest: (window.__BUILD__ && window.__BUILD__.digest) || null,
         buildTime: (window.__BUILD__ && window.__BUILD__.time) || null
@@ -5903,13 +5928,8 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
   (function initWorkerUI() {
     const badge = document.getElementById('sb-worker');
     if (!badge) return;
-    if (!WK.supported) {
-      badge.textContent = '不可用（降级主线程）';
-      badge.style.color = '#f59e0b';
-    } else {
-      try { badge.textContent = WK.ensure() ? '已启用' : '不可用（主线程回退）'; }
-      catch (e) { badge.textContent = '初始化失败'; }
-    }
+    if (WK.supported) WK.ensure();
+    WK.syncUI();
     const cancel = document.getElementById('sb-cancel');
     if (cancel) cancel.onclick = () => { WK.cancelAll(); setBusy(false, '已取消'); cancel.style.display = 'none'; };
   })();
