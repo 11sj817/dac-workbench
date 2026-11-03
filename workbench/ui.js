@@ -1045,12 +1045,18 @@
       }
     }
 
-    const prm = r.meta.params;
+    const prm = r.meta.params || {};
+    const bits = [];
+    if (prm.lowPct != null && prm.highPct != null) bits.push(`云校准：${prm.lowPct}/${prm.highPct} 分位、${prm.levels || '?'} 级、${prm.drops || '?'} 次云滴`);
+    if (prm.k != null) bits.push(`聚类：KMeans++ k=${prm.k}`);
+    if (prm.treeDepth != null) {
+      bits.push(`树：CART(Gini) 深度 ${prm.treeDepth}` + (prm.minLeaf != null ? `、最小叶 ${prm.minLeaf}` : ''));
+    }
+    if (prm.netThreshold != null) bits.push(`网络 |r| ≥ ${prm.netThreshold}`);
+    if (prm.seed != null) bits.push(`随机种子 ${prm.seed}`);
     M.push({
       tag: '口径',
-      text: `云校准：${prm.lowPct}/${prm.highPct} 分位、${prm.levels} 级、${prm.drops} 次云滴；` +
-        `聚类：KMeans++ k=${prm.k}；树：CART(Gini) 深度 ${prm.treeDepth}、最小叶 ${prm.minLeaf}；` +
-        `随机种子 ${prm.seed}。<span class="muted">同参数同种子可复算。</span>`
+      text: bits.join('；') + '。<span class="muted">同参数同种子可复算。</span>'
     });
 
     return M;
@@ -4160,14 +4166,97 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
       if (btn) btn.textContent = light ? '深色' : '浅色';
     };
     apply(saved === 'light');
-    if (btn) {
-      btn.onclick = () => {
-        const light = !document.body.classList.contains('light');
-        apply(light);
-        try { localStorage.setItem(KEY, light ? 'light' : 'dark'); } catch (e) { }
-      };
-    }
+    // 主题按钮的点击行为统一交给 initPalette（避免双重绑定）
   }
   initTheme();
+
+  /* ---------------- 配色与字号（可调，存本机） ---------------- */
+  function initPalette() {
+    const KEY = 'dac-palette-v1';
+    const panel = document.getElementById('palettePanel');
+    const btn = document.getElementById('btnPalette');
+    if (!panel || !btn) return;
+
+    const defaults = { theme: 'dark', accent: '', stripe: 'weak', font: '1' };
+    let cfg = Object.assign({}, defaults);
+    try {
+      const raw = localStorage.getItem(KEY);
+      if (raw) cfg = Object.assign(cfg, JSON.parse(raw));
+    } catch (e) { }
+
+    const save = () => { try { localStorage.setItem(KEY, JSON.stringify(cfg)); } catch (e) { } };
+
+    const apply = () => {
+      const body = document.body;
+      // 主题
+      const sysLight = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches;
+      const light = cfg.theme === 'light' || (cfg.theme === 'auto' && sysLight);
+      body.classList.toggle('light', light);
+      const tb = document.getElementById('btnTheme');
+      if (tb) tb.textContent = light ? '深色' : '浅色';
+
+      // 强调色
+      const root = document.documentElement;
+      if (cfg.accent) {
+        root.style.setProperty('--acc', cfg.accent);
+        // 强调色的浅一档用于 hover/次要文字
+        root.style.setProperty('--acc2', cfg.accent);
+      } else {
+        root.style.removeProperty('--acc');
+        root.style.removeProperty('--acc2');
+      }
+
+      // 斑马纹：按实际生效的主题取色（不按 cfg 推断，避免手动切 class 时错配）
+      const darkEven = { none: 'transparent', weak: '#0f1922', strong: '#0a1219' };
+      const lightEven = { none: 'transparent', weak: '#F7F9FA', strong: '#E8EEF2' };
+      const isLightNow = body.classList.contains('light');
+      const pick = isLightNow ? lightEven : darkEven;
+      root.style.setProperty('--row-even', pick[cfg.stripe] || pick.weak);
+
+      // 字号
+      root.style.setProperty('--fs', cfg.font);
+      document.body.style.fontSize = `calc(14.5px * ${cfg.font})`;
+
+      // 同步按钮态
+      document.querySelectorAll('#palTheme button').forEach(b => b.classList.toggle('on', b.dataset.v === cfg.theme));
+      document.querySelectorAll('#palStripe button').forEach(b => b.classList.toggle('on', b.dataset.v === cfg.stripe));
+      document.querySelectorAll('#palFont button').forEach(b => b.classList.toggle('on', b.dataset.v === cfg.font));
+      document.querySelectorAll('#palAccent button[data-c]').forEach(b => b.classList.toggle('on', b.dataset.c === cfg.accent));
+    };
+
+    btn.onclick = (e) => { e.stopPropagation(); panel.hidden = !panel.hidden; };
+    document.getElementById('palClose').onclick = () => { panel.hidden = true; };
+    panel.addEventListener('click', e => e.stopPropagation());
+    document.addEventListener('click', () => { if (!panel.hidden) panel.hidden = true; });
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') panel.hidden = true; });
+
+    document.querySelectorAll('#palTheme button').forEach(b => {
+      b.onclick = () => { cfg.theme = b.dataset.v; save(); apply(); };
+    });
+    document.querySelectorAll('#palStripe button').forEach(b => {
+      b.onclick = () => { cfg.stripe = b.dataset.v; save(); apply(); };
+    });
+    document.querySelectorAll('#palFont button').forEach(b => {
+      b.onclick = () => { cfg.font = b.dataset.v; save(); apply(); };
+    });
+    document.querySelectorAll('#palAccent button[data-c]').forEach(b => {
+      b.onclick = () => { cfg.accent = b.dataset.c; save(); apply(); };
+    });
+    const custom = document.getElementById('palAccentCustom');
+    if (custom) custom.oninput = () => { cfg.accent = custom.value; save(); apply(); };
+    document.getElementById('palReset').onclick = () => { cfg = Object.assign({}, defaults); save(); apply(); };
+
+    // 右上角旧的主题按钮改为切换到"深/浅"两个明确值
+    const tb = document.getElementById('btnTheme');
+    if (tb) {
+      tb.onclick = () => {
+        cfg.theme = (cfg.theme === 'light') ? 'dark' : 'light';
+        save(); apply();
+      };
+    }
+
+    apply();
+  }
+  initPalette();
 
 })();

@@ -9,6 +9,8 @@
   --bg:#0a1017; --panel:#111a24; --panel2:#16222e; --line:#22313f;
   --txt:#dfe9f3; --dim:#8aa0b4; --acc:#4c9aff; --acc2:#22d3ee;
   --warn:#f59e0b; --bad:#ef4444; --ok:#34d399; --violet:#a78bfa;
+  /* 表格行色：浅色主题必须单独覆盖，否则深色底配深色字看不清 */
+  --row-even:#0f1922; --row-hover:#13202c;
 }
 *{box-sizing:border-box}
 body{margin:0;background:radial-gradient(1200px 600px at 85% -10%,#12263a 0%,var(--bg) 55%);
@@ -70,8 +72,8 @@ th,td{padding:6px 9px;border-bottom:1px solid var(--line);text-align:right}
 th:first-child,td:first-child{text-align:left}
 th{color:var(--dim);font-weight:500;font-size:11.5px;cursor:pointer;user-select:none;white-space:nowrap}
 th:hover{color:var(--acc2)}
-tbody tr:hover{background:#13202c}
-tbody tr:nth-child(even){background:#0f1922}
+tbody tr:hover{background:var(--row-hover)}
+tbody tr:nth-child(even){background:var(--row-even)}
 .pill{display:inline-block;padding:1px 7px;border-radius:20px;font-size:11px}
 .pill.ok{background:#0d3b2e;color:var(--ok)}
 .pill.warn{background:#3b2c0d;color:var(--warn)}
@@ -190,6 +192,11 @@ body.light .card{background:#FFFFFF;border-color:var(--line)}
 body.light .tabs button{background:#FFFFFF;border-color:var(--line);color:var(--dim)}
 body.light .tabs button.on{background:var(--acc);border-color:var(--acc);color:#fff}
 body.light table th{background:var(--panel2)}
+body.light{ --row-even:#F7F9FA; --row-hover:#EAF0F4; }
+body.light tbody tr:nth-child(even){background:var(--row-even)}
+body.light tbody tr:hover{background:var(--row-hover)}
+body.light tbody td{color:var(--txt)}
+body.light tbody td code{color:var(--acc);background:var(--panel2)}
 body.light .summary{background:#FFFFFF;border-color:var(--line)}
 body.light .summary h4{color:var(--acc)}
 body.light .summary li{color:var(--txt)}
@@ -280,6 +287,33 @@ button.mini,button.ghost{border-radius:4px}
   .steps{display:none}
 }
 
+
+/* ---- 配色面板 ---- */
+#btnPalette{padding:4px 9px;font-size:13px;border-radius:4px;border:1px solid var(--line);
+  background:var(--panel2);color:var(--txt);cursor:pointer;line-height:1.2}
+#btnPalette:hover{border-color:var(--acc)}
+.palette{position:fixed;right:16px;top:56px;width:296px;z-index:200;
+  background:var(--panel);border:1px solid var(--line);border-radius:8px;
+  box-shadow:0 12px 40px rgba(0,0,0,.35);padding:14px;font-size:12.5px}
+.pal-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+.pal-head b{font-size:13px}
+#palClose{border:none;background:transparent;color:var(--dim);cursor:pointer;font-size:14px;padding:2px 6px}
+#palClose:hover{color:var(--txt)}
+.pal-row{display:flex;align-items:center;gap:10px;margin:10px 0}
+.pal-row > label{width:64px;flex:0 0 auto;color:var(--dim);font-size:11.5px}
+.pal-seg{display:flex;gap:0;border:1px solid var(--line);border-radius:5px;overflow:hidden;flex:1}
+.pal-seg button{flex:1;padding:5px 4px;border:none;background:transparent;color:var(--dim);
+  font-size:11.5px;cursor:pointer;border-right:1px solid var(--line)}
+.pal-seg button:last-child{border-right:none}
+.pal-seg button.on{background:var(--acc);color:#fff}
+.pal-seg button:hover:not(.on){background:var(--panel2);color:var(--txt)}
+.pal-swatches{display:flex;gap:6px;flex-wrap:wrap;flex:1}
+.pal-swatches button{width:24px;height:24px;border-radius:4px;border:2px solid transparent;cursor:pointer}
+.pal-swatches button.on{border-color:var(--txt);box-shadow:0 0 0 2px var(--panel)}
+#palAccentCustom{width:24px;height:24px;padding:0;border:1px solid var(--line);border-radius:4px;cursor:pointer;background:transparent}
+.pal-foot{display:flex;justify-content:space-between;align-items:center;margin-top:14px;
+  padding-top:10px;border-top:1px solid var(--line)}
+body.light .palette{background:#fff;box-shadow:0 12px 40px rgba(0,0,0,.15)}
 </style>
 </head>
 <body>
@@ -292,6 +326,7 @@ button.mini,button.ghost{border-radius:4px}
   <span class="tag">贝叶斯网络</span>
   <div class="grow"></div>
     <button id="btnTheme" title="切换深色/浅色">浅色</button>
+    <button id="btnPalette" title="配色与字号">🎨</button>
   <ol class="steps" id="steps">
     <li data-step="1" class="on">1 数据</li>
     <li data-step="2">2 变量</li>
@@ -397,6 +432,57 @@ button.mini,button.ghost{border-radius:4px}
   <div class="grow"></div>
   <span class="sb-hint">Worker: <b id="sb-worker">检测中</b></span>
   <button class="ghost mini" id="sb-cancel" style="display:none">取消计算</button>
+</div>
+<div id="palettePanel" class="palette" hidden>
+  <div class="pal-head">
+    <b>配色与字号</b>
+    <button id="palClose" title="关闭">✕</button>
+  </div>
+
+  <div class="pal-row">
+    <label>主题</label>
+    <div class="pal-seg" id="palTheme">
+      <button data-v="dark">深色</button>
+      <button data-v="light">浅色</button>
+      <button data-v="auto">跟随系统</button>
+    </div>
+  </div>
+
+  <div class="pal-row">
+    <label>强调色</label>
+    <div class="pal-swatches" id="palAccent">
+      <button data-c="#4c9aff" style="background:#4c9aff" title="蓝"></button>
+      <button data-c="#3F6E8C" style="background:#3F6E8C" title="灰蓝"></button>
+      <button data-c="#2E7D5B" style="background:#2E7D5B" title="墨绿"></button>
+      <button data-c="#B4761A" style="background:#B4761A" title="赭石"></button>
+      <button data-c="#8B4A6F" style="background:#8B4A6F" title="紫红"></button>
+      <button data-c="#4A5568" style="background:#4A5568" title="石墨"></button>
+      <input type="color" id="palAccentCustom" value="#4c9aff" title="自定义">
+    </div>
+  </div>
+
+  <div class="pal-row">
+    <label>表格斑马纹</label>
+    <div class="pal-seg" id="palStripe">
+      <button data-v="none">无</button>
+      <button data-v="weak">弱</button>
+      <button data-v="strong">强</button>
+    </div>
+  </div>
+
+  <div class="pal-row">
+    <label>字号</label>
+    <div class="pal-seg" id="palFont">
+      <button data-v="0.92">小</button>
+      <button data-v="1">中</button>
+      <button data-v="1.1">大</button>
+    </div>
+  </div>
+
+  <div class="pal-foot">
+    <button id="palReset" class="ghost mini">恢复默认</button>
+    <span class="muted" style="font-size:11px">设置保存在本机浏览器</span>
+  </div>
 </div>
 <div class="toast" id="toast"></div>
 <div class="tip" id="tip"></div>
