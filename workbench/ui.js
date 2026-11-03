@@ -2661,9 +2661,13 @@
 
   /* ---------------- AI 助手（可选 API 接入） ---------------- */
   const AI_KEY = 'dac-workbench-ai';
+  // cors: true 表示服务端返回 Access-Control-Allow-Origin，浏览器可直连；
+  // false 表示浏览器会被 CORS 拦截，必须走中转站。
+  // 实测（2026-11）：DeepSeek 返回完整 CORS 头；智谱 open.bigmodel.cn 不返回任何 Access-Control-*。
   const PROVIDERS = {
     deepseek: {
       name: 'DeepSeek', base: 'https://api.deepseek.com/v1', model: 'deepseek-flash',
+      cors: true,    // 实测：返回 Access-Control-Allow-Origin = 当前站点
       // 服务商实际接受的模型名以 /models 接口为准，这里只是常见候选
       models: ['deepseek-flash', 'deepseek-v4-pro', 'deepseek-chat', 'deepseek-reasoner']
     },
@@ -2674,7 +2678,8 @@
     moonshot: { name: '月之暗面 Kimi', base: 'https://api.moonshot.cn/v1', model: 'moonshot-v1-8k',
       models: ['moonshot-v1-8k', 'moonshot-v1-32k', 'kimi-k2-0905-preview'] },
     zhipu: { name: '智谱 GLM', base: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-flash',
-      models: ['glm-4-flash', 'glm-4-plus', 'glm-4-air'] },
+      cors: false,   // 实测：OPTIONS 200 但无 Access-Control-* 头，浏览器无法直连
+      models: ['glm-4-flash', 'glm-4.5', 'glm-4.6', 'glm-5', 'glm-5.1', 'glm-5.3-flash'] },
     siliconflow: { name: '硅基流动', base: 'https://api.siliconflow.cn/v1', model: 'Qwen/Qwen2.5-7B-Instruct',
       models: ['Qwen/Qwen2.5-7B-Instruct', 'deepseek-ai/DeepSeek-V3'] },
     relay: { name: '中转站（自定义）', base: '', model: '', models: [] },
@@ -2783,7 +2788,19 @@
     } catch (e) {
       clearTimeout(timer);
       if (e && e.name === 'AbortError') throw new Error('请求超时（' + Math.round((o.timeoutMs || 90000) / 1000) + 's）或被取消');
-      throw new Error('网络请求失败：' + (e && e.message ? e.message : String(e)));
+      const msg = (e && e.message) ? e.message : String(e);
+      if (/Failed to fetch|NetworkError|Load failed/i.test(msg)) {
+        const provName = (PROVIDERS[prov] && PROVIDERS[prov].name) || prov;
+        const noCors = (PROVIDERS[prov] && PROVIDERS[prov].cors === false);
+        throw new Error(
+          `网络请求失败（${provName}）：${msg}` +
+          (noCors
+            ? '\n这是 CORS 拦截，不是 Key 或参数问题：该服务商的接口不返回 Access-Control-Allow-Origin，浏览器无法直连。' +
+              '解决办法：① 换成支持跨域的 DeepSeek；② 或配一个允许跨域的中转站（服务商选「relay」并填中转地址）。'
+            : '\n可能是网络中断、Base URL 写错，或该服务商不允许浏览器直连（需中转站）。')
+        );
+      }
+      throw new Error('网络请求失败：' + msg);
     }
 
     if (!res.ok) {
@@ -3199,6 +3216,16 @@
     box.appendChild(testOut);
     boxWrap.appendChild(box);
     pane.appendChild(boxWrap);
+
+    // 服务商不支持浏览器直连时，提前说清楚，避免用户以为是 Key 写错
+    const curProv = (aiCfg().provider || 'deepseek');
+    if (PROVIDERS[curProv] && PROVIDERS[curProv].cors === false) {
+      pane.appendChild(el('div', { class: 'hint', style: 'border-color:#5a4a2a;color:#f5c66b;margin-top:10px', html:
+        `<b>${esc(PROVIDERS[curProv].name)} 不支持浏览器直连</b>：实测其接口不返回 <code>Access-Control-Allow-Origin</code>，` +
+        '在浏览器里调用会被 CORS 拦截，表现为 <code>Failed to fetch</code>。<br>' +
+        '这不是 Key 或参数问题。两条路：① 换成 <b>DeepSeek</b>（实测支持跨域直连）；' +
+        '② 服务商选「<b>中转站（自定义）</b>」，填一个允许跨域的中转地址。' }));
+    }
 
     // 发送前预览：让用户先看清要把什么发给第三方
     const preview = el('div', { class: 'hint', style: 'display:none' });
