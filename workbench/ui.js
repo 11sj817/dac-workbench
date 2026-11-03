@@ -2621,6 +2621,60 @@
 
 
   /* ---------------- 统计建模（GLM） ---------------- */
+  /**
+   * 按目标类型推荐 GLM 分布。
+   * 关键：多类无序目标没有对应的单参数 GLM —— 不推荐任何分布，返回 null，
+   * 由 fit 阶段的适用性检查给出明确拒绝，而不是静默套 gaussian。
+   */
+  function recommendFamily(t) {
+    if (!t) return 'gaussian';
+    if (t.type === 'binary') return 'binomial';
+    if (t.type === 'count') return 'poisson';
+    if (t.type === 'categorical' || t.type === 'nominal') return null;   // K>2 类：不适用
+    if (t.type === 'ordinal') return null;                                // 有序：应走有序模型
+    return 'gaussian';
+  }
+
+  /**
+   * GLM 适用性检查。返回 {ok, reason, hints[]}。
+   * 宁可不给数，也不给一个方法上不成立的数。
+   */
+  function glmApplicability(yv, t, family) {
+    const uniq = Array.from(new Set(yv.filter(Number.isFinite))).sort((a, b) => a - b);
+    const K = uniq.length;
+    const hints = [];
+    if (K <= 1) {
+      return { ok: false, reason: `目标只有 ${K} 个不同取值，无法做回归`, hints };
+    }
+    if (K === 2) {
+      // 二分类：binomial 正确；gaussian/poisson 也能算但不推荐
+      if (family && family !== 'binomial') {
+        return {
+          ok: true,
+          warn: `目标是二分类，当前用 ${family}；通常应选 Binomial（logit）`,
+          hints
+        };
+      }
+      return { ok: true, hints };
+    }
+    // K > 2
+    if (t && (t.type === 'categorical' || t.type === 'nominal')) {
+      hints.push(`把 ${K} 个类别当成连续值回归，等于假设"类别 1 和类别 2 的距离等于类别 2 和类别 3"——这个假设没有依据。`);
+      hints.push('可行做法：①在「变量角色」里把目标改成二分类（指定一个正类）；②改用多项 logit（本工具未实现）；③若类别本身有序，用有序 logit（本工具未实现）。');
+      return { ok: false, reason: `目标是无序类别（${K} 类），单参数 GLM 不适用`, hints };
+    }
+    if (t && t.type === 'ordinal') {
+      hints.push(`这 ${K} 个等级是有序的，但普通 gaussian 回归假设"等级间隔相等"，通常不成立。`);
+      hints.push('可行做法：①按业务含义合并成二分类；②用有序 logit（本工具未实现）。若你接受"间隔相等"的近似，可以继续，但结论要标注这个假设。');
+      return { ok: true, warn: `目标是有序等级（${K} 级），gaussian 假设等级间隔相等`, hints };
+    }
+    // count / continuous 但取值少
+    if (K <= 5 && t && t.type === 'count') {
+      hints.push(`${K} 个取值的计数目标，Poisson 可以，但样本稀疏时标准误可能偏大。`);
+    }
+    return { ok: true, hints };
+  }
+
   function glmState() {
     if (!S.extra.glm) {
       S.extra.glm = { family: 'gaussian', response: '', xvars: [], reference: {}, fit: null, error: null, roc: null, cm: null, weightCol: '' };
@@ -2647,6 +2701,24 @@
       types[c] = C.detectTargetType(S.rows.map(r => r[j]));
     });
 
+    /* 适用性提示：先把"能不能这么算"说清楚，再让人算 */
+    if (S.res && S.res.meta && S.res.meta.target) {
+      const tt = types[S.res.meta.target];
+      if (tt) {
+        const yvNow = S.rows.map(r => r[S.columns.indexOf(S.res.meta.target)]);
+        const appNow = glmApplicability(yvNow, tt, q.family);
+        if (!appNow.ok || appNow.warn) {
+          const box = el('div', { class: 'hint', style: 'margin:10px 0;border-color:' + (appNow.ok ? '#5a4a1a' : '#7a2a2a') });
+          box.innerHTML = '<b>' + (appNow.ok ? '⚠ 需要注意' : '✖ 当前目标不适合直接拟合') + '</b>：'
+            + esc(appNow.reason || appNow.warn || '')
+            + (appNow.hints && appNow.hints.length
+              ? '<div class="muted" style="margin-top:6px">' + appNow.hints.map(h => '· ' + esc(h)).join('<br>') + '</div>'
+              : '');
+          pane.appendChild(box);
+        }
+      }
+    }
+
     /* 选择 */
     const grid = el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap;margin:12px 0' });
     const cell = (label, node, w) => el('div', { style: 'width:' + (w || 200) + 'px' },
@@ -2663,9 +2735,7 @@
       q.response = S.res.meta.target;
       const tt = types[q.response];
       if (tt) {
-        if (tt.type === 'binary') q.family = 'binomial';
-        else if (tt.type === 'count') q.family = 'poisson';
-        else q.family = 'gaussian';
+        q.family = recommendFamily(tt);
       }
     }
     S.numeric.forEach(c => {
@@ -2680,9 +2750,7 @@
       // 自动推荐分布
       const t = types[q.response];
       if (t) {
-        if (t.type === 'binary') q.family = 'binomial';
-        else if (t.type === 'count') q.family = 'poisson';
-        else q.family = 'gaussian';
+        q.family = recommendFamily(t);
       }
       renderGLM();
     };
@@ -2773,6 +2841,14 @@
         const yv = S.rows.map(r => r[idxT]);
         const badY = yv.findIndex(v => !Number.isFinite(v));
         if (badY >= 0) throw new Error(`目标变量第 ${badY + 1} 行不是有效数值：${JSON.stringify(yv[badY])}（GLM 要求因变量为数值）`);
+
+        // 适用性检查：方法上不成立就不给数
+        const app = glmApplicability(yv, types[q.response], q.family);
+        q.applicability = app;
+        if (!app.ok) {
+          const detail = [app.reason].concat(app.hints || []).join('\n· ');
+          throw new Error(detail);
+        }
         const numCols = [], catCols = [];
         q.xvars.forEach(c => {
           const j = S.columns.indexOf(c);

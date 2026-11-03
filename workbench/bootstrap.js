@@ -476,7 +476,8 @@
           // 预处理只在重采样内拟合
           const im = P ? P.fitImputer(Xs, names, { strategy: o.impute || 'median' }) : null;
           const Xf = im ? P.transformImputer(Xs, im, Xs).matrix : Xs;
-          const km = C.kmeans(Xf, o.k, { seed: o.seed + b, nInit: 4 });
+          // nInit 降到 2：Bootstrap 关心的是"这次重采样得到的结构"，不是全局最优
+          const km = C.kmeans(Xf, o.k, { seed: o.seed + b, nInit: 2 });
           // 统一参考集：把模型应用到全部原始样本
           // 关键：先用 km 的 med/iqr 把参考集映射到与 centers 相同的标准化空间，
           // 否则距离是「原始值 vs 标准化中心」，标签会退化成常数。
@@ -498,7 +499,12 @@
           rec.sizes = km.centers.map((_, c) => refLabels.filter(x => x === c).length);
           rec.inertia = km.inertia;
           rec.emptyClusters = km.emptyClusters || 0;
-          rec.silhouette = C.silhouette(km.Z, km.labels);
+          // silhouette 是 O(n²)：400 样本 × 20 轮 = 320 万次距离计算，
+          // 实测光这一步就让 Bootstrap 跑到 331s。它不参与稳定性统计
+          // （稳定性看 ARI/NMI/共聚类矩阵），只在需要时算一次。
+          if (o.wantSilhouette) {
+            rec.silhouette = C.silhouette(km.Z, km.labels);
+          }
           rec.ok = true;
         } else if (o.task === 'rules') {
           const Xs = idx.map(i => data.X[i]);
