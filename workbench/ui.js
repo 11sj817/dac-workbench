@@ -3078,10 +3078,19 @@
   async function callLLMRetry(messages, opt) {
     const o = Object.assign({ retries: 2, retryDelay: 800 }, opt || {});
     let lastErr = null;
+    let bumped = false;
     for (let i = 0; i < o.retries; i++) {
       try {
         return await callLLM(messages, o);
       } catch (e) {
+        // 推理模型把 token 全用在 thinking 上：换大上限再试一次（只加一次，避免无限烧 token）
+        const msg0 = String(e && e.message || '');
+        if (!bumped && /推理过程、正文为空/.test(msg0)) {
+          bumped = true;
+          o.maxTokens = Math.max(RETRY_MAX_TOKENS, (o.maxTokens || 0));
+          i--;                                  // 这一次不算失败
+          continue;
+        }
         lastErr = e;
         const msg = String(e && e.message || '');
         if (/HTTP 4\d\d/.test(msg)) throw e;                 // 客户端错误，不重试
@@ -3096,9 +3105,11 @@
 
   /** 各服务商的输出上限（推理型模型需留足 thinking 预算） */
   const MAX_TOKENS_BY_PROVIDER = {
-    deepseek: 4000, zhipu: 4000, openai: 4000,
-    dashscope: 3000, moonshot: 4000, siliconflow: 3000, relay: 4000, custom: 4000
+    deepseek: 8000, zhipu: 8000, openai: 8000,
+    dashscope: 6000, moonshot: 6000, siliconflow: 6000, relay: 8000, custom: 8000
   };
+  // 推理型模型的 thinking 会先吃掉 token；正文为空时用这个上限再试一次
+  const RETRY_MAX_TOKENS = 16000;
 
   /**
    * 调用 OpenAI 兼容接口，返回结构化结果而不是裸字符串。
@@ -3180,7 +3191,8 @@
         throw new Error(
           `模型只输出了推理过程、正文为空（finish=${finish || '?'}，输出 ${usage.completion_tokens || 0} tokens）。` +
           '这是推理型模型的常见现象：token 被 thinking 消耗完。' +
-          `已自动请求 ${maxTokens} 上限，仍不足请换非推理模型（如 deepseek-chat）或调低问题复杂度。`
+          `本次请求 max_tokens=${o.maxTokens || maxTokens}，模型 ${model}。` +
+          '已自动用更大上限重试过一次；仍为空请换非推理模型（如 deepseek-chat），或在「接入设置」里把模型改成普通对话模型。'
         );
       }
       throw new Error(
@@ -3563,6 +3575,7 @@
       bTest.disabled = true;
       bTest.textContent = '测试中…';
       testOut.style.display = '';
+      testOut.className = 'testout';
       testOut.innerHTML = '正在请求…';
       aiSave({ provider: selP.value, baseURL: inBase.value.trim(), model: inModel.value.trim(),
                key: inKey.value.trim(), persist: persistChk.checked });
@@ -3572,11 +3585,13 @@
         const txt = r0.content;
         const ms = Math.round(performance.now() - t0);
         testOut.style.borderColor = '#1f4a3c';
-        testOut.innerHTML = `<b style="color:#34d399">连接成功</b> · 延迟 ${ms}ms · 模型 ${inModel.value || '(默认)'}<br>
+        testOut.className = 'testout ok';
+    testOut.innerHTML = `<b style="color:#34d399">连接成功</b> · 延迟 ${ms}ms · 模型 ${inModel.value || '(默认)'}<br>
           <span class="muted">返回：${(txt || '').slice(0, 60)}</span>`;
       } catch (e) {
         testOut.style.borderColor = '#5a2020';
-        testOut.innerHTML = `<b style="color:#ef4444">连接失败</b><br>${diagnose(e)}<br>
+        testOut.className = 'testout bad';
+      testOut.innerHTML = `<b style="color:#ef4444">连接失败</b><br>${diagnose(e)}<br>
           <span class="muted" style="word-break:break-all">${String(e.message).slice(0, 200)}</span>`;
       }
       bTest.disabled = false;
