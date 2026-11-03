@@ -1046,21 +1046,32 @@
     return `${name} 属于 ${use[0]}~${use[use.length - 1]}`;
   }
 
-  function collectRules(node, featureNames, labels, conds, out) {
+  function collectRules(node, featureNames, labels, conds, out, condsRaw) {
     out = out || [];
     conds = conds || [];
+    condsRaw = condsRaw || [];
     if (node.f === undefined) {
       const idx = node.counts.indexOf(Math.max(...node.counts));
       out.push({
-        conditions: conds.slice(), then: labels[idx],
+        conditions: conds.slice(),
+        // 结构化条件：{ f: 变量名, t: 等级空间阈值, left: 是否走左支, lo/hi: 该支覆盖的等级区间 }
+        // 有了它，调用方才能把「低」反解回原始量纲的切点
+        condRaw: condsRaw.slice(),
+        then: labels[idx],
+        thenLevel: idx,
         support: node.n, confidence: node.counts[idx] / node.n,
         distribution: node.counts.slice()
       });
       return out;
     }
     const name = featureNames[node.f];
-    collectRules(node.left, featureNames, labels, conds.concat([condDesc(name, node.t, labels, true)]), out);
-    collectRules(node.right, featureNames, labels, conds.concat([condDesc(name, node.t, labels, false)]), out);
+    const k = Math.max(0, Math.min(labels.length - 1, Math.floor(node.t + 1e-9)));
+    collectRules(node.left, featureNames, labels,
+      conds.concat([condDesc(name, node.t, labels, true)]), out,
+      condsRaw.concat([{ f: name, t: node.t, left: true, lo: 0, hi: k }]));
+    collectRules(node.right, featureNames, labels,
+      conds.concat([condDesc(name, node.t, labels, false)]), out,
+      condsRaw.concat([{ f: name, t: node.t, left: false, lo: k + 1, hi: labels.length - 1 }]));
     return out;
   }
 
@@ -1160,8 +1171,17 @@
     L.push('## 四、组合效应规则\n');
     L.push('变量重要性：' + tree.importances.map(i => `${i.name} ${(i.value * 100).toFixed(1)}%`).join('、') + '\n');
     tree.rules.forEach((r, i) => {
-      L.push(`${i + 1}. **IF** ${r.conditions.join(' 且 ') || '（无分裂）'} → **THEN ${meta.target} = ${r.then}**（n=${r.support}，置信度 ${(r.confidence * 100).toFixed(1)}%）`);
+      // 附上原始量纲区间：用户要能把这条件套回自己的业务阈值
+      const withRange = (r.conditions || []).map((c2, k) => {
+        const rg = r.condRanges && r.condRanges[k];
+        return rg ? `${c2}（${rg}）` : c2;
+      }).join(' 且 ');
+      L.push(`${i + 1}. **IF** ${withRange || '（无分裂）'} → **THEN ${meta.target} = ${r.then}**（n=${r.support}，置信度 ${(r.confidence * 100).toFixed(1)}%）`);
     });
+    if (tree.rules.some(r => r.condRanges && r.condRanges.some(x => x))) {
+      L.push('');
+      L.push('> 括号里是该等级对应的**原始量纲范围**（按本次校准的切点换算）。换一份数据或改分位设置，切点会变。');
+    }
     L.push('');
     L.push('## 五、影响机制网络\n');
     L.push(`|r| ≥ ${net.threshold} 剪枝后保留 ${net.edges.length} 条边。\n`);

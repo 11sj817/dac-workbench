@@ -783,6 +783,48 @@
       } catch (e) { /* 指纹失败不影响分析 */ }
     })();
 
+    // 规则反解：把等级条件映射回原始量纲
+    // 「花瓣长 = 低」→「≤ 2.77」；「中」→「2.77 ~ 3.93」
+    // condRaw 是 collectRules 输出的结构化条件（变量名 + 等级区间）
+    (function attachRanges() {
+      const tInfo2 = (res.meta && res.meta.targetType) || {};
+      const NOM = ['binary', 'categorical', 'nominal'];
+      const isNomTgt = NOM.indexOf(tInfo2.type) >= 0;
+      // compute 里的变量名是 cal（res.calibration.factors === cal）
+      const thOf = f => {
+        const cf = cal && cal[f];
+        return (cf && Array.isArray(cf.thresholds)) ? cf.thresholds : null;
+      };
+      // 按有效数字决定小数位，并去掉尾随 0：0.8 → "0.8"，不是 "0.800"
+      const put = v => {
+        const a = Math.abs(v);
+        let d;
+        if (a >= 1000) d = 0;
+        else if (a >= 100) d = 1;
+        else if (a >= 10) d = 1;
+        else if (a >= 1) d = 2;
+        else if (a >= 0.1) d = 3;
+        else if (a >= 0.01) d = 4;
+        else d = 5;
+        return String(Number(v.toFixed(d)));
+      };
+      (res.tree.rules || []).forEach(r => {
+        const src = r.condRaw || null;
+        r.condRanges = Array.isArray(src)
+          ? src.map(c => {
+            const th = thOf(c.f);
+            if (!th || !th.length) return null;
+            const L = th.length + 1;
+            if (L === 2) return c.hi === 0 ? `≤ ${put(th[0])}` : `> ${put(th[0])}`;
+            if (c.lo === 0) return `≤ ${put(th[0])}`;
+            if (c.hi === L - 1) return `> ${put(th[L - 2])}`;
+            return `${put(th[c.lo - 1])} ~ ${put(th[c.hi])}`;
+          })
+          : null;
+        r.thenIsNominal = isNomTgt;
+      });
+    })();
+
     // 证据登记表：报告/AI/图表共用同一套 metricId
     // 注意：这里只做首次生成；严格CV/Bootstrap/GLM 完成后由 refreshDerived() 重算
     try { res.evidence = buildEvidence(res); } catch (e) { res.evidence = []; }
@@ -1174,6 +1216,7 @@
   window.__dacState = () => S;          // 只读引用，便于控制台复核
   window.__dacRun = () => run();        // 便于测试与自动化；与点「运行完整分析」等价
   window.__dacImportProject = null;     // 由 importProjectFile 所在作用域填入
+  window.__callLLMTest = null;          // 测试用：走完整重试逻辑（在 callLLMRetryCore 定义后填入）
 
   /* ---------------- 派生结果刷新 ----------------
    * 证据表 / 报告 / 摘要都依赖「当前」的严格CV、Bootstrap、GLM 结果。
@@ -1370,7 +1413,10 @@
       const share = (rule.support / Math.max(1, r.meta.usedRows) * 100).toFixed(1);
       M.push({
         tag: '规则',
-        text: `<b>IF</b> ${rule.conditions.map(c => `<code>${esc(c)}</code>`).join(' 且 ') || '（无分裂）'} ` +
+        text: `<b>IF</b> ${rule.conditions.map((c, k) => {
+        const rg = rule.condRanges && rule.condRanges[k];
+        return `<code>${esc(c)}</code>` + (rg ? ` <span class="muted">（${esc(rg)}）</span>` : '');
+      }).join(' 且 ') || '（无分裂）'} ` +
           `<b>THEN</b> ${esc(tgt)} = <b>${esc(rule.then)}</b>` +
           `（n=${rule.support}，占 ${share}%，叶内该类占比 ${(rule.confidence * 100).toFixed(1)}%）` +
           `<span class="muted">——「叶内占比」是训练集内的条件比例，不是置信区间，也不代表未来可靠性。</span>`
@@ -2471,7 +2517,10 @@
     const rules = t.rules.slice().sort((a, b2) => b2.support * b2.confidence - a.support * a.confidence);
     rules.forEach((r, i) => {
       pane.appendChild(el('div', { class: 'rule', html:
-        `<b>R${i + 1}</b> IF ${r.conditions.map(c => `<code>${esc(c)}</code>`).join(' 且 ') || '（无分裂）'}
+        `<b>R${i + 1}</b> IF ${r.conditions.map((c, k) => {
+          const rg = r.condRanges && r.condRanges[k];
+          return `<code>${esc(c)}</code>` + (rg ? ` <span class="muted">（${esc(rg)}）</span>` : '');
+        }).join(' 且 ') || '（无分裂）'}
          → THEN <code>${esc(S.res.meta.target)} = ${esc(r.then)}</code>
          <div class="meta">支持度 n=${r.support}（${pct(r.support / S.res.meta.usedRows)}）· 置信度 ${pct(r.confidence)} · 分布 ${r.distribution.join('/')}</div>` }));
     });
@@ -3643,7 +3692,13 @@
     }
     if (/\b403\b/.test(m)) return 'Key 没有该模型权限，或地区受限（403）。';
     if (/\b404\b/.test(m)) return 'Base URL 或模型名不对（404）。检查是不是漏了 /v1。';
-    if (/\b429\b/.test(m)) return '触发限流或余额不足（429）。';
+    if (/\b429\b/.test(m)) {
+      const ra = /等待 (\d+) 秒|Retry-After[：:]?\s*(\d+)/.exec(m);
+      const sec = ra ? (ra[1] || ra[2]) : null;
+      return sec
+        ? `触发限流（429）。服务商要求等待 ${sec} 秒后重试——已自动重试过，仍未解除。`
+        : '触发限流或余额不足（429）。降低提问频率，或检查账户余额。';
+    }
     if (/\b5\d\d\b/.test(m)) return '服务端错误，稍后再试。';
     return '未知错误，看下面的原始信息。';
   }
@@ -3752,6 +3807,8 @@
     if (S.aiLog.length > 200) S.aiLog.splice(0, S.aiLog.length - 200);
   }
 
+  window.__callLLMTest = (messages, opt) => callLLMRetryCore(messages, opt);
+
   async function callLLMRetryCore(messages, opt) {
     const o = Object.assign({ retries: 2, retryDelay: 800 }, opt || {});
     let lastErr = null;
@@ -3770,8 +3827,30 @@
         }
         lastErr = e;
         const msg = String(e && e.message || '');
-        if (/HTTP 4\d\d/.test(msg)) throw e;                 // 客户端错误，不重试
         if (/没填 API Key/.test(msg)) throw e;
+
+        // 429 是限流，不是"参数错了"——必须重试，而且按服务商说的等
+        const is429 = (e && e.status === 429) || /\b429\b/.test(msg);
+        if (is429) {
+          const wait = (e && Number.isFinite(e.retryAfterMs))
+            ? Math.min(60000, Math.max(200, e.retryAfterMs))
+            : o.retryDelay * Math.pow(2, i);
+          if (i < o.retries - 1) {
+            if (typeof o.onWait === 'function') o.onWait(wait, i + 1);
+            await new Promise(res => setTimeout(res, wait));
+            continue;
+          }
+          // 重试用完还是 429：把"该等多久"写进消息，别让用户瞎猜
+          const hint = (e && Number.isFinite(e.retryAfterMs))
+            ? `服务商要求等待 ${Math.round(e.retryAfterMs / 1000)} 秒（Retry-After）。`
+            : '未提供 Retry-After。';
+          const e2 = new Error(msg + `\n限流未解除。${hint}建议降低频率、换模型，或检查余额。`);
+          e2.status = 429;
+          e2.retryAfterMs = e && e.retryAfterMs;
+          throw e2;
+        }
+
+        if (/HTTP 4\d\d/.test(msg)) throw e;                 // 其他客户端错误，重试没用
         if (i < o.retries - 1) {
           await new Promise(res => setTimeout(res, o.retryDelay * Math.pow(2, i)));
         }
@@ -3836,7 +3915,28 @@
     if (!res.ok) {
       clearTimeout(timer);
       const t = await res.text().catch(() => '');
-      throw new Error('HTTP ' + res.status + '：' + t.slice(0, 300));
+      const err = new Error('HTTP ' + res.status + '：' + t.slice(0, 300));
+      err.status = res.status;
+      // 429 会带 Retry-After（秒数或 HTTP 日期）。原样留下来，交给重试层决定等多久。
+      const ra = res.headers && res.headers.get ? res.headers.get('Retry-After') : null;
+      if (ra) {
+        err.retryAfterRaw = ra;
+        const sec = Number(ra);
+        if (Number.isFinite(sec)) {
+          err.retryAfterMs = Math.max(0, sec * 1000);
+        } else {
+          const dt = Date.parse(ra);
+          if (Number.isFinite(dt)) err.retryAfterMs = Math.max(0, dt - Date.now());
+        }
+      }
+      // 部分服务商把等待时间写在 body 里
+      if (err.retryAfterMs === undefined) {
+        const m1 = /"retry_after"\s*:\s*([0-9.]+)/i.exec(t);
+        const m2 = /try again in\s+([0-9.]+)\s*s/i.exec(t);
+        const mm = m1 || m2;
+        if (mm) err.retryAfterMs = Math.max(0, parseFloat(mm[1]) * 1000);
+      }
+      throw err;
     }
 
     let j;
