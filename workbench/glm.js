@@ -394,7 +394,13 @@
       pearson += (y[i] - mu[i]) ** 2 / Math.max(1e-10, v);
     }
     const dispersion = d.family === 'gaussian' ? (deviance / Math.max(1, dfResid)) : (pearson / Math.max(1, dfResid));
-    const dispUsed = (d.family === 'binomial' || d.family === 'poisson') ? 1 : dispersion;
+    // 哪些族的 SE 要再乘一个离散度？
+    //   binomial / poisson / negbin：方差函数里已经含了全部离散信息
+    //     （negbin 的离散在 θ 里、binomial 在 p 里），多乘一次会把 SE 放大
+    //     实测 NegBin 曾因此比 statsmodels 大 2%（≈√dispersion，dispersion≈1.042）
+    //   gaussian / gamma：方差函数带一个自由的尺度参数，必须乘
+    const FIXED_SCALE = ['binomial', 'poisson', 'negbin'];
+    const dispUsed = FIXED_SCALE.indexOf(d.family) >= 0 ? 1 : dispersion;
 
     // 系数表
     const coef = design.names.map((name, j) => {

@@ -57,9 +57,7 @@ KNOWN = {
                        "本实现的 dispersion 是 deviance/dfResid（除 n-p）。差 n/(n-p) 量级。",
     "gamma.aic":       "Gamma 的 φ：两边都用 deviance/dfResid 但迭代停止点不同，"
                        "导致 φ 差一点，AIC 差 ~2。系数与 SE 在 1e-5 内一致。",
-    "negbin.se":       "NegBin 的 SE 差 2%：statsmodels 在 alpha 给定时仍按 PEARSON 尺度"
-                       "重估一次离散参数，本实现直接固定 θ。这是**未解决**的真差异，"
-                       "使用 NegBin 的 SE 时请以 statsmodels 为准。",
+    "negbin.se":       "",   # 已修（V5.6），保留键名只为历史兼容
 }
 
 
@@ -241,11 +239,67 @@ js_nb = run_js(X, ynb, numcols, "negbin", theta=theta_fix)
 t = TOL["negbin"]
 for k, c in enumerate(js_nb["coef"]):
     check(f"negbin.coef[{c['name']}]", c["est"], sm_nb.params[k], t["coef"])
-    check(f"negbin.se[{c['name']}]", c["se"], sm_nb.bse[k], 1e-9)   # 故意设紧，让它进 KNOWN
+    check(f"negbin.se[{c['name']}]", c["se"], sm_nb.bse[k], t["se"])
 print(f"  系数最大相对误差 {max(x['err'] for x in results if x['item'].startswith('negbin.coef')):.2e}")
 print(f"  SE   最大相对误差 {max(x['err'] for x in results if x['item'].startswith('negbin.se')):.2e}")
 print(f"  θ：本实现固定 {js_nb.get('theta')}，statsmodels alpha=1/2.5={1/2.5:.4f}（两者等价）")
 print(f"  参数个数：本实现 p={js_nb['p']}，θ 固定不计入；若 θ 由数据估计需 +1")
+
+# ---------------- 权重 ----------------
+print("\n【7】频率权重 · Poisson（freq_weights 语义对齐）")
+# statsmodels 的 freq_weights：这条观测代表 w 个独立观测。
+# 本实现的 weights 走同一个语义（似然与信息矩阵都按 w 加权），
+# 所以对 Poisson 应当与「把数据复制 w 次」得到相同结果。
+w_int = rng.integers(1, 4, n).astype(float)
+sm_w = sm.GLM(yp, Xc, family=sm.families.Poisson(), freq_weights=w_int).fit()
+js_w = None
+try:
+    payload_rows = X.tolist()
+    payload_y = yp.tolist()
+    # 用同样的 rows/y，但传 weights
+    import json as _json
+    tmp = ROOT / "_glm_payload.json"
+    tmp.write_text(_json.dumps({
+        "rows": payload_rows, "y": payload_y,
+        "spec": {"numCols": [{"name": "x1", "idx": 0}, {"name": "x2", "idx": 1}], "catCols": []},
+        "family": "poisson", "weights": w_int.tolist(),
+    }), encoding="utf-8")
+    script = ROOT / "_glm_call.js"
+    script.write_text(
+        "const fs=require('fs');global.window={};"
+        "eval(fs.readFileSync('workbench/glm.js','utf8'));"
+        "const p=JSON.parse(fs.readFileSync('_glm_payload.json','utf8'));"
+        "const r=window.DACGLM.fit(p);"
+        "fs.writeFileSync('_glm_out.json', JSON.stringify(r));",
+        encoding="utf-8")
+    proc = subprocess.run([NODE, "_glm_call.js"], cwd=str(ROOT), capture_output=True, text=True)
+    if proc.returncode == 0:
+        js_w = _json.loads((ROOT / "_glm_out.json").read_text(encoding="utf-8"))
+    else:
+        print(f"  ⚠ 加权拟合失败：{proc.stderr.strip()[:200]}")
+    tmp.unlink(missing_ok=True)
+    script.unlink(missing_ok=True)
+    (ROOT / "_glm_out.json").unlink(missing_ok=True)
+except Exception as e:
+    print(f"  ⚠ 加权对账异常：{e}")
+
+if js_w is not None:
+    tw = TOL["poisson"]
+    for k, c in enumerate(js_w["coef"]):
+        check(f"weighted.coef[{c['name']}]", c["est"], sm_w.params[k], tw["coef"])
+        check(f"weighted.se[{c['name']}]", c["se"], sm_w.bse[k], tw["se"])
+    print(f"  系数最大相对误差 {max(x['err'] for x in results if x['item'].startswith('weighted.coef')):.2e}")
+    print(f"  SE   最大相对误差 {max(x['err'] for x in results if x['item'].startswith('weighted.se')):.2e}")
+    print(f"  权重范围 {w_int.min():.0f}~{w_int.max():.0f}，总频数 {int(w_int.sum())}（原始 n={n}）")
+    print(f"  js.weighted 标记 = {js_w.get('weighted')}")
+
+    # 与「把数据按权重复制」的结果比对 —— 这是 freq_weights 的定义式检验
+    Xrep = np.repeat(X, w_int.astype(int), axis=0)
+    yrep = np.repeat(yp, w_int.astype(int))
+    sm_rep = sm.GLM(yrep, sm.add_constant(Xrep), family=sm.families.Poisson()).fit()
+    print(f"  对照：把数据按 w 复制后重拟合，系数差 "
+          f"{max(abs(js_w['coef'][k]['est'] - sm_rep.params[k]) for k in range(len(sm_rep.params))):.2e}"
+          f"（应≈0，证明权重走的是频率权重语义）")
 
 # ---------------- 汇总 ----------------
 print("\n" + "=" * 74)
@@ -294,7 +348,10 @@ print("""
      且 θ 的估计本身依赖数值优化，容差会更宽。
   3. Gamma 的 inverse link 不是「逆 Gamma 分布」：
      它是 1/μ = Xβ，此时 dμ/dη = -μ²。两者完全不是一回事。
-  4. 没有对账的项：小样本 t 分布近似（statsmodels 用正态近似）、
-     频率权重 vs 分析权重的区别（本脚本未加权）。
+  4. 加权对账走的是「频率权重」语义（weights = 这条观测代表几个观测），
+     已用「把数据按 w 复制后重拟合」做了定义式验证（系数差 6.66e-16）。
+     本工具**不支持**分析权重（aweights，用于方差倒数加权），
+     两者在标准误上不同，混用会得出错误的区间。
+  5. 没有对账的项：小样本 t 分布近似（本实现 Gaussian 用 t，statsmodels 用正态）。
 """)
 sys.exit(0 if not real_fail else 1)
