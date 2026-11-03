@@ -2,6 +2,9 @@
 """合并 workbench：HTML + CSS + JS + 三份公开数据集，产出单文件。"""
 import json
 from pathlib import Path
+import hashlib
+import subprocess
+from datetime import datetime, timezone
 
 ROOT = Path(__file__).resolve().parent
 WB = ROOT / "workbench"
@@ -30,6 +33,26 @@ worker_src = "self.window = self;\n" + pre + "\n" + core + "\n" + boot + "\n" + 
 js_literal = json.dumps(worker_src).replace("</", "<\\/")
 html = html.replace("<!--CORE-->\n<!--UI-->",
                     "<script>window.__WORKER_SRC__ = " + js_literal + ";</script>\n" + bundle)
+# ---- 构建信息注入（区分源提交 / 部署提交 / 构建摘要）----
+def _git(cmd):
+    try:
+        r = subprocess.run(["git"] + cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=10)
+        return r.stdout.strip() if r.returncode == 0 else None
+    except Exception:
+        return None
+
+# 构建摘要：对「已注入 worker 的正文」取 SHA-256 前 12 位（不含 __BUILD__ 自身，避免自指）
+_build_digest = hashlib.sha256(html.encode("utf-8")).hexdigest()[:12]
+_build_info = {
+    "digest": _build_digest,
+    "time": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "sourceCommit": _git(["rev-parse", "HEAD"]),
+    "sourceDirty": bool((_git(["status", "--porcelain"]) or "").strip()),
+    "note": "sourceCommit 是构建时本地 HEAD；部署提交是推送后生成的新提交，两者不同属正常。",
+}
+_build_js = json.dumps(_build_info, ensure_ascii=False).replace("</", "<\\/")
+html = html.replace("<script>", "<script>window.__BUILD__ = " + _build_js + ";</script>\n<script>", 1)
+
 OUT.write_text(html, encoding="utf-8")
 
 # V3.0：统一构建——一个源，三处产物，避免"改了源码但线上没更新"
@@ -39,7 +62,6 @@ for t in TARGETS:
     t.write_text(html, encoding="utf-8")
 
 # 一致性校验：三份产物的 SHA1 必须相同
-import hashlib
 def _h(x): return hashlib.sha1(x.read_bytes()).hexdigest()[:12]
 hashes = {str(OUT.relative_to(ROOT)): _h(OUT)}
 for t in TARGETS:
@@ -52,3 +74,4 @@ kb = OUT.stat().st_size / 1024
 print(f"built: {OUT.name}  {kb:.0f} KB")
 for token in ("__DATASETS__", "DACCore", "renderAI", "initDatasets"):
     print(f"  contains {token}:", token in html)
+print("构建摘要:", _build_digest, "| 源提交:", (_build_info["sourceCommit"] or "未知")[:8])

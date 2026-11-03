@@ -732,6 +732,21 @@
       bn, sens, bnError, stateSpace,
       leakFeatures
     };
+    // runId：把「这次结果」和「这份数据 + 这套配置」绑起来
+    // 数据或配置一变，旧的 runId 就不该再被当成当前结果
+    (async () => {
+      try {
+        const fp = await dataFingerprint(S.columns, S.rows);
+        const cfg = configFingerprint();
+        S.dataHash = fp.hash;
+        S.configHash = cfg.hash;
+        S.runId = (fp.hash.slice(0, 12) + '-' + cfg.hash.slice(0, 8));
+        res.runId = S.runId;
+        res.dataHash = S.dataHash;
+        res.configHash = S.configHash;
+      } catch (e) { /* 指纹失败不影响分析 */ }
+    })();
+
     // 证据登记表：报告/AI/图表共用同一套 metricId
     // 注意：这里只做首次生成；严格CV/Bootstrap/GLM 完成后由 refreshDerived() 重算
     try { res.evidence = buildEvidence(res); } catch (e) { res.evidence = []; }
@@ -1042,6 +1057,85 @@
       return (g && g.ok !== false) ? g : null;
     }
   };
+
+  /* ---------------- 数据指纹 ----------------
+   * 为什么不能只哈希首行：改第 2 行就查不出来。
+   * 序列化规则（写死在版本号里，改格式必须升版本）：
+   *   dac-data/1
+   *   字段分隔    \u001F (US)
+   *   记录分隔    \u001E (RS)
+   *   缺失        \u0000 (NUL)
+   *   数值        String(v)（整数不带小数点，如 1 而不是 1.0）
+   *   类型        由 DACPre.inferType 推断后写进指纹
+   * ------------------------------------------------- */
+  const DATA_FP_VERSION = 'dac-data/1';
+
+  function fnv1a64(str) {
+    // 退化路径：crypto.subtle 不可用时用（明确标注为弱哈希）
+    let h1 = 0x811c9dc5, h2 = 0x01000193;
+    for (let i = 0; i < str.length; i++) {
+      const c = str.charCodeAt(i);
+      h1 ^= c; h1 = Math.imul(h1, 0x01000193) >>> 0;
+      h2 = (h2 + c) >>> 0; h2 = Math.imul(h2, 0x85ebca6b) >>> 0;
+    }
+    return (h1.toString(16).padStart(8, '0') + h2.toString(16).padStart(8, '0'));
+  }
+
+  async function dataFingerprint(columns, rows) {
+    const US = '\u001F', RS = '\u001E', NUL = '\u0000';
+    const parts = [DATA_FP_VERSION, 'cols=' + columns.length, columns.join(US)];
+    // 每列的类型（缺失/数值/文本）——schema 的一部分
+    const types = columns.map((c, j) => {
+      try { return window.DACPre ? window.DACPre.inferType(rows.map(r => r[j]), { name: c }) : '?'; }
+      catch (e) { return '?'; }
+    });
+    parts.push('types=' + types.join(','));
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      const cells = new Array(columns.length);
+      for (let j = 0; j < columns.length; j++) {
+        const v = r[j];
+        cells[j] = (v === null || v === undefined) ? NUL : String(v);
+      }
+      parts.push(cells.join(US));
+    }
+    const text = parts.join(RS);
+    const bytes = new TextEncoder().encode(text);
+    let alg = 'FNV1a-64', hash = fnv1a64(text);
+    if (typeof crypto !== 'undefined' && crypto.subtle && crypto.subtle.digest) {
+      try {
+        const buf = await crypto.subtle.digest('SHA-256', bytes);
+        alg = 'SHA-256';
+        hash = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+      } catch (e) { /* 保留弱哈希 */ }
+    }
+    return {
+      alg, hash,
+      rows: rows.length, cols: columns.length,
+      bytes: bytes.length,
+      version: DATA_FP_VERSION,
+      types
+    };
+  }
+
+  /** 配置指纹：目标 + 因子 + 角色 + 参数（不含数据） */
+  function configFingerprint() {
+    const payload = {
+      v: 'dac-config/1',
+      target: S.target,
+      factors: (S.factors || []).slice().sort(),
+      roles: S.roles || {},
+      params: S.params || {}
+    };
+    const text = JSON.stringify(payload);
+    let alg = 'FNV1a-64', hash = fnv1a64(text);
+    return { alg, hash, text: text.length };
+  }
+
+  // 暴露给测试与调试（也便于用户在控制台复核项目指纹）
+  window.__dacFingerprint = dataFingerprint;
+  window.__dacConfigFingerprint = configFingerprint;
+  window.__dacState = () => S;          // 只读引用，便于控制台复核
 
   /* ---------------- 派生结果刷新 ----------------
    * 证据表 / 报告 / 摘要都依赖「当前」的严格CV、Bootstrap、GLM 结果。
@@ -4269,29 +4363,42 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
   }
 
   /* ---------------- 项目管理（版本化 JSON） ---------------- */
-  const PROJ_VERSION = 'dac-project/2.6';
+  const PROJ_VERSION = 'dac-project/2.7';
 
-  function projectSnapshot(includeData) {
+  async function projectSnapshot(includeData) {
     const r = S.res;
+    // 全量指纹：覆盖所有行 + 列名 + 类型，不是只哈希首行
+    const fp = await dataFingerprint(S.columns, S.rows);
+    const cfg = configFingerprint();
     return {
       format: PROJ_VERSION,
       name: (S.projectName || '未命名项目'),
       createdAt: new Date().toISOString(),
-      app: { name: 'DAC Workbench', version: '2.6', algo: 'v2.1+' },
+      app: {
+        name: 'DAC Workbench', version: '2.7', algo: 'v4.8',
+        // 源提交与部署提交要能区分：构建时由 build 脚本注入
+        buildDigest: (window.__BUILD__ && window.__BUILD__.digest) || null,
+        buildTime: (window.__BUILD__ && window.__BUILD__.time) || null
+      },
       dataset: {
         name: S.fileName || (S.sheets ? S.sheets[S.sheetIdx].name : '内置示例'),
         rows: S.rows.length, cols: S.columns.length,
         columns: S.columns.slice(),
         // 默认不打包原始数据，避免项目文件失控膨胀与隐私外泄
-        data: includeData ? S.rowsRaw || S.rows : null,
-        hash: (() => {
-          const str = JSON.stringify(S.columns) + '|' + S.rows.length + '|' +
-            (S.rows[0] ? JSON.stringify(S.rows[0]) : '');
-          let h = 5381;
-          for (let i = 0; i < str.length; i++) h = ((h * 33) ^ str.charCodeAt(i)) >>> 0;
-          return 'h' + h.toString(16);
-        })()
+        data: includeData ? (S.rowsRaw || S.rows) : null,
+        // 全量指纹（含序列化版本、列名、类型、每行每格）
+        hash: fp.hash,
+        hashAlg: fp.alg,
+        hashVersion: fp.version,
+        hashBytes: fp.bytes,
+        hashTypes: fp.types,
+        // 导入时的解析元信息（分隔符等），便于复现"数据怎么进来的"
+        importMeta: S.importMeta || null
       },
+      // 配置指纹：目标 + 因子 + 角色 + 参数
+      config: { hash: cfg.hash, alg: cfg.alg, text2: cfg.text },
+      // 本次运行的唯一标识（数据 + 配置 + 时间戳），用于把结果与输入绑定
+      runId: (S.runId || null),
       roles: S.roles,
       selections: { target: S.target, factors: S.factors },
       params: S.params,
@@ -4311,8 +4418,8 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
     };
   }
 
-  function exportProject(includeData) {
-    const proj = projectSnapshot(includeData);
+  async function exportProject(includeData) {
+    const proj = await projectSnapshot(includeData);
     const name = (proj.name || 'project').replace(/[\\/:*?"<>|]/g, '_');
     download(`DAC项目_${name}_${stamp()}.json`, JSON.stringify(proj, null, 2), 'application/json');
     toast(includeData ? '已导出（含数据）' : '已导出（不含原始数据，仅参数与结果）', 4000);
@@ -4329,18 +4436,36 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
       if (!proj.format.startsWith('dac-project/2.')) {
         throw new Error('项目版本不兼容：' + proj.format + '（当前支持 2.x）');
       }
-      // 恢复
-      if (proj.dataset && Array.isArray(proj.dataset.data)) {
-        S.columns = proj.dataset.columns.slice();
-        S.rows = proj.dataset.data.map(r => r.slice());
-        S.rowsRaw = S.rows.map(r => r.slice());
-        S.numeric = C.numericCols(S.columns, S.rows);
-        toast('已恢复数据（' + S.rows.length + ' 行）');
-      } else if (proj.dataset && Array.isArray(proj.dataset.columns)) {
-        if (!S.columns.length) {
+      // 恢复（带全量指纹校验，异步）
+      const verify = async () => {
+        if (!proj.dataset) return null;
+        const want = proj.dataset.hash;
+        if (Array.isArray(proj.dataset.data)) {
+          S.columns = proj.dataset.columns.slice();
+          S.rows = proj.dataset.data.map(r => r.slice());
+          S.rowsRaw = S.rows.map(r => r.slice());
+          S.numeric = C.numericCols(S.columns, S.rows);
+        } else if (!S.columns.length) {
           toast('项目未含数据；请先导入同名列的数据集，再应用参数', 6000);
+          return null;
         }
-      }
+        if (!want) {
+          toast('该项目来自旧版本，没有全量指纹，无法校验数据是否一致', 6000);
+          return null;
+        }
+        const fp = await dataFingerprint(S.columns, S.rows);
+        if (fp.hash === want) {
+          toast(`数据校验通过（${fp.alg}，${fp.rows} 行 × ${fp.cols} 列）`, 4000);
+          return true;
+        }
+        // 不一致必须说出来，不能静默继续
+        const msg = `数据指纹不一致：项目 ${String(want).slice(0, 12)}… 当前 ${fp.hash.slice(0, 12)}…（${fp.alg}）`;
+        toast(msg + ' —— 参数与结果可能与当前数据不对应', 9000);
+        S.projMismatch = { want, got: fp.hash, alg: fp.alg };
+        return false;
+      };
+      const restored = verify();
+      if (restored && restored.then) restored.then(() => { if (proj.runId) S.runId = proj.runId; });
       if (proj.roles) S.roles = Object.assign({}, proj.roles);
       if (proj.selections) {
         if (proj.selections.target) S.target = proj.selections.target;
