@@ -1016,13 +1016,27 @@
       const loTag = (sc.names && sc.names[sc.stats.indexOf(lo)]) || {};
       const hiName = hiTag.tag ? `${hi.name}「${hiTag.tag}」` : hi.name;
       const loName = loTag.tag ? `${lo.name}「${loTag.tag}」` : lo.name;
-      F.push({
-        tag: '异质性',
-        text: `分成 <b>${sc.k}</b> 组（轮廓 ${(sc.silhouette || 0).toFixed(2)}，分母 ${valid.reduce((a, x) => a + x.n, 0)}）。` +
-          `「${esc(tgt)}」均值最高的是 <b>${esc(hiName)}</b>（${hi.mean[tgt].toFixed(3)}，n=${hi.n}），` +
-          `最低的是 <b>${esc(loName)}</b>（${lo.mean[tgt].toFixed(3)}，n=${lo.n}）。` +
-          `<span class="muted">组间差异说明不宜用单一模型笼统概括。</span>`
-      });
+      const hiV = hi.mean[tgt], loV = lo.mean[tgt];
+      const tie = Math.abs(hiV - loV) < 1e-12;
+      // 并列要如实说：不能把"所有组一样"写成"最高/最低"
+      const tieCount = valid.filter(x => Math.abs(x.mean[tgt] - hiV) < 1e-12).length;
+      if (tie) {
+        F.push({
+          tag: '异质性',
+          text: `分成 <b>${sc.k}</b> 组（轮廓 ${(sc.silhouette || 0).toFixed(2)}，分母 ${valid.reduce((a, x) => a + x.n, 0)}）。` +
+            `各组「${esc(tgt)}」均值<b>完全相同</b>（${hiV.toFixed(3)}），没有可以排序的高低。` +
+            `<span class="muted">这通常意味着目标变量是类别编码、或聚类未按目标分层；不要据此比较组间差异。</span>`
+        });
+      } else {
+        F.push({
+          tag: '异质性',
+          text: `分成 <b>${sc.k}</b> 组（轮廓 ${(sc.silhouette || 0).toFixed(2)}，分母 ${valid.reduce((a, x) => a + x.n, 0)}）。` +
+            `「${esc(tgt)}」均值最高的是 <b>${esc(hiName)}</b>（${hiV.toFixed(3)}，n=${hi.n}），` +
+            `最低的是 <b>${esc(loName)}</b>（${loV.toFixed(3)}，n=${lo.n}）` +
+            (tieCount > 1 ? `；另有 ${tieCount - 1} 组并列最高` : '') + '。' +
+            `<span class="muted">组间差异说明不宜用单一模型笼统概括。</span>`
+        });
+      }
     }
 
     const st = RES.strictOk();
@@ -1707,7 +1721,7 @@
     const pane = $('#pane'), cal = S.res.calibration;
     pane.innerHTML = '';
     pane.appendChild(el('div', { class: 'muted', html:
-      `云模型：Ex = 分位区间中点，En = 半区间/(3×等级数)，He = En/10，云滴 <b>${S.res.meta.params.drops}</b> 次 Monte Carlo。` }));
+      `云模型：Ex = 分位区间中点，En = 半区间/(3×等级数)，He = En/10 —— 三者均按分位数<b>构造</b>，不是从数据估计；He 与 En 成固定比例，不用于变量间排名。云滴 <b>${S.res.meta.params.drops}</b> 次 Monte Carlo。` }));
     const names = Object.keys(cal.factors);
     const tb = el('table');
     tb.appendChild(el('thead', { html: '<tr><th>变量</th><th>等级分布</th><th>切点</th><th>平均隶属度</th><th>歧义率</th></tr>' }));

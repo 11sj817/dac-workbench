@@ -372,7 +372,11 @@ body.light .palette{background:#fff;box-shadow:0 12px 40px rgba(0,0,0,.15)}
       <input type="range" id="drops" min="100" max="1000" step="50" value="500">
       <label class="row">离散等级 <b id="vLevels">3</b></label>
       <input type="range" id="levels" min="2" max="4" value="3">
-      <div class="hint">Ex = 分位区间中点；En = 半区间 /(3×等级数)；He = En/10。</div>
+      <div class="hint">
+        <b>Ex</b> = 分位区间中点（构造）；<b>En</b> = 半区间 /(3×等级数)（构造，使 3En 约等于半个等级宽）；<b>He</b> = En/10（构造）。
+        <br><span class="muted">三者都是按分位数<b>构造</b>的，不是从数据估计的云参数。逆向云算法（从样本估 Ex/En/He）本工具未实现。
+        He = En/10 只是常见设定，不是云模型的定义性公式；由于它是 En 的固定比例，在本工具里不携带额外信息，因此不用于变量间比较或排名。</span>
+      </div>
       <button id="next3" style="width:100%;margin-top:10px">下一步：分析</button>
     </div>
 
