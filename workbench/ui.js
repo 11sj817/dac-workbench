@@ -1217,6 +1217,7 @@
   window.__dacRun = () => run();        // 便于测试与自动化；与点「运行完整分析」等价
   window.__dacImportProject = null;     // 由 importProjectFile 所在作用域填入
   window.__callLLMTest = null;          // 测试用：走完整重试逻辑（在 callLLMRetryCore 定义后填入）
+  window.__callLLMStreamTest = null;    // 测试用：流式调用
 
   /* ---------------- 派生结果刷新 ----------------
    * 证据表 / 报告 / 摘要都依赖「当前」的严格CV、Bootstrap、GLM 结果。
@@ -3809,6 +3810,7 @@
   }
 
   window.__callLLMTest = (messages, opt) => callLLMRetryCore(messages, opt);
+  window.__callLLMStreamTest = (messages, opt) => callLLMStream(messages, opt);
 
   async function callLLMRetryCore(messages, opt) {
     const o = Object.assign({ retries: 2, retryDelay: 800 }, opt || {});
@@ -4482,7 +4484,14 @@ ${JSON.stringify(b, null, 1)}
 
     // 2) 解读结果
     acts.appendChild(mk('📝 让 AI 解读结果', async (btn, out) => {
-      btn.disabled = true; out.className = 'ai-msg'; out.textContent = '写作中…';
+      btn.disabled = true;
+      out.className = 'ai-msg busy';
+      out.textContent = '';
+      const ab2 = new AbortController();
+      const holder2 = el('div', { style: 'margin-top:6px' });
+      out.appendChild(holder2);
+      const h2 = makeStreamBubble(holder2);
+      h2.stopButton.onclick = () => ab2.abort();
       try {
         const b = brief();
         const prompt = `你是论文写作助手。下面是一次数据分析的真实结果（JSON）：
@@ -4493,9 +4502,21 @@ ${JSON.stringify(b, null, 1)}
 2) 条件组合规则：挑 2 条最重要的规则，说明业务含义；
 3) 条件依赖：哪个变量在给定网络下与结果关联最强（给出条件概率差值），并说明这不是干预效应，P(Y|X) ≠ P(Y|do(X))。
 要求：只能使用 JSON 里出现过的数字；不要编造变量名；语气客观。`;
-        const txt = (await callLLM([{ role: 'user', content: prompt }])).content;
+        let txt = '';
+        try {
+          const sr = await callLLMStream([{ role: 'user', content: prompt }], {
+            signal: ab2.signal, onDelta: d => h2.onDelta(d)
+          });
+          txt = sr.content;
+        } catch (e0) {
+          if (e0.aborted) { h2.error('已停止'); btn.disabled = false; return; }
+          // 流式失败退回非流式
+          txt = (await callLLMRetry([{ role: 'user', content: prompt }], { retries: 2 })).content;
+        }
         out.className = 'ai-msg';
-        out.textContent = txt;
+        out.textContent = '';
+        h2.finish(txt, '');
+        out.appendChild(holder2);
         const bad = auditNumbers(txt, r);
         const note = el('div', { class: 'hint', style: 'margin-top:8px' });
         note.innerHTML = bad.length
@@ -4563,7 +4584,7 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
     ].join('\n');
 
     const chat = S.extra.chat || (S.extra.chat = []);
-    const chatCard = el('div', { class: 'card', style: 'margin-top:14px;background:#0f1a24' });
+    const chatCard = el('div', { class: 'card', style: 'margin-top:14px' });
     chatCard.appendChild(el('h3', { text: '对话（可追问，带上下文）', style: 'margin-bottom:8px;font-size:12px' }));
 
     const stream = el('div', {
@@ -4580,13 +4601,19 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
         const isUser = m.role === 'user';
         const row = el('div', { style: 'display:flex;justify-content:' + (isUser ? 'flex-end' : 'flex-start') });
         const bubble = el('div', {
-          style: 'max-width:88%;padding:10px 12px;border-radius:12px;font-size:13px;line-height:1.7;' +
+          style: 'max-width:88%;padding:10px 12px;border-radius:12px;font-size:13px;line-height:1.75;' +
             'white-space:pre-wrap;word-break:break-word;' +
             (isUser
-              ? 'background:#1b4a72;border:1px solid #2a6ea8;color:#eaf4ff;border-bottom-right-radius:4px'
-              : 'background:#131f2b;border:1px solid var(--line);color:var(--txt);border-bottom-left-radius:4px')
+              ? 'background:var(--bubble-user);border:1px solid var(--bubble-line);color:var(--txt);border-bottom-right-radius:4px'
+              : 'background:var(--bubble-think);border:1px solid var(--bubble-line);color:var(--txt);border-bottom-left-radius:4px')
         });
-        bubble.textContent = m.content;
+        if (m.reasoning) {
+          const th = el('details', { class: 'ai-think' });
+          th.appendChild(el('summary', { text: `思考过程（${m.reasoning.length} 字，点开看）` }));
+          th.appendChild(el('pre', { text: m.reasoning }));
+          bubble.appendChild(th);
+        }
+        bubble.appendChild(el('div', { text: m.content }));
         if (m.meta) {
           bubble.appendChild(el('div', { class: 'muted',
             style: 'font-size:11px;margin-top:7px;border-top:1px dashed var(--line);padding-top:5px',
@@ -4603,7 +4630,7 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
     const inputRow = el('div', { style: 'display:flex;gap:8px;align-items:flex-end' });
     const ta = el('textarea', {
       rows: '2', placeholder: '问点什么…（Enter 发送，Shift+Enter 换行）',
-      style: 'flex:1;resize:vertical;min-height:46px;padding:10px 12px;background:#0b141d;' +
+      style: 'flex:1;resize:vertical;min-height:46px;padding:10px 12px;background:var(--panel2);' +
         'border:1px solid var(--line);border-radius:9px;color:var(--txt);font-size:13px;font-family:inherit'
     });
     const bSend = el('button', { class: 'mini', text: '发送' });
@@ -4611,14 +4638,26 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
     inputRow.appendChild(bSend);
     chatCard.appendChild(inputRow);
 
+    let CUR = null;   // 当前进行中的请求 { abort, handle }
+
     const send = async (text) => {
       const q2 = String(text || '').trim();
       if (!q2) return;
+      if (CUR) return;   // 已有请求在跑，防重复
       chat.push({ role: 'user', content: q2 });
       renderChat();
       bSend.disabled = true;
-      bSend.textContent = '…';
+      bSend.textContent = '生成中…';
       ta.value = '';
+
+      // 立刻挂一个流式气泡，让用户看到"已经在动"
+      const ab = new AbortController();
+      const holder = el('div', { style: 'display:flex;justify-content:flex-start' });
+      stream.appendChild(holder);
+      const handle = makeStreamBubble(holder);
+      handle.stopButton.onclick = () => { ab.abort(); };
+      stream.scrollTop = stream.scrollHeight;
+      CUR = { abort: ab, handle };
       try {
         // 上下文由 buildAIContext 统一构建（含严格 CV / Bootstrap / 泄漏筛查 / 有效性），
         // 只发聚合统计，不发原始行；结果 JSON 仅挂最后一条，避免重复传大 payload
@@ -4630,14 +4669,38 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
           .concat(hist)
           .concat([{ role: 'user', content: q2 + ctx }]);
         const t0 = performance.now();
-        let r2 = null, degraded = false;
+        let r2 = null, degraded = false, aborted = false;
         try {
-          r2 = await callLLMRetry(msgs, { retries: 2 });
-        } catch (e) {
-          // AI 不可用：退回本地模板，但要说清楚
-          r2 = { content: localTemplateAnswer(r), finishReason: 'local', usage: {} };
-          degraded = true;
-          r2.content = '⚠ AI 调用失败（' + String(e.message).slice(0, 160) + '）\n以下为本地模板结果：\n\n' + r2.content;
+          // 先试流式：用户能立刻看到字，不用干等
+          r2 = await callLLMStream(msgs, {
+            signal: ab.signal,
+            onDelta: d => handle.onDelta(d)
+          });
+          aiLogPush({
+            role: 'assistant', ok: true,
+            q: q2.slice(0, 800), a: String(r2.content).slice(0, 4000),
+            provider: aiCfg().provider, model: r2.model, ms: Date.now() - t0,
+            streamed: true, firstTokenMs: r2.firstTokenMs
+          });
+        } catch (e0) {
+          if (e0.aborted) {
+            aborted = true;
+            r2 = { content: (e0.partial || '').trim(), finishReason: 'aborted', usage: {} };
+          } else if (e0.emptyBody || /只输出了推理过程/.test(String(e0.message))) {
+            // 推理型模型流式下正文为空：退回非流式（会带更大 max_tokens 与自动重试）
+            try {
+              r2 = await callLLMRetry(msgs, { retries: 2 });
+              handle.finish(r2.content, '已完成（非流式回退）');
+            } catch (e1) {
+              r2 = { content: localTemplateAnswer(r), finishReason: 'local', usage: {} };
+              degraded = true;
+              r2.content = '⚠ AI 调用失败（' + String(e1.message).slice(0, 160) + '）\n以下为本地模板结果：\n\n' + r2.content;
+            }
+          } else {
+            r2 = { content: localTemplateAnswer(r), finishReason: 'local', usage: {} };
+            degraded = true;
+            r2.content = '⚠ AI 调用失败（' + String(e0.message).slice(0, 160) + '）\n以下为本地模板结果：\n\n' + r2.content;
+          }
         }
         const txt2 = r2.content;
         const ms = Math.round(performance.now() - t0);
@@ -4653,13 +4716,28 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
         if (refs.length) parts.push(`引用 ${refs.slice(0, 3).map(e => e.id).join('、')}${refs.length > 3 ? ' 等 ' + refs.length + ' 项' : ''}`);
         if (r2.finishReason === 'length') parts.push('输出被截断');
         const meta = parts.join(' · ');
-        chat.push({ role: 'assistant', content: txt2, meta, refs: refs.map(e => e.id), degraded });
+        if (aborted) parts.unshift('已停止');
+        chat.push({
+          role: 'assistant', content: txt2, meta: parts.join(' · '),
+          reasoning: r2.reasoning || null,
+          refs: refs.map(e => e.id), degraded
+        });
+        if (aborted && !txt2.trim()) {
+          handle.error('已停止（还没收到内容）');
+          setTimeout(() => { try { holder.remove(); } catch (e2) { } }, 900);
+        } else {
+          handle.finish(txt2, parts.join(' · '));
+        }
       } catch (e) {
+        handle.error('⚠ ' + diagnose(e) + '\n' + String(e.message).slice(0, 320));
         chat.push({ role: 'assistant', content: '⚠ ' + diagnose(e) + '\n' + String(e.message).slice(0, 320), meta: '请求失败' });
+      } finally {
+        CUR = null;
+        bSend.disabled = false;
+        bSend.textContent = '发送';
+        // 流式气泡已就地显示最终内容，这里只滚到底，不整块重绘（避免闪烁）
+        stream.scrollTop = stream.scrollHeight;
       }
-      bSend.disabled = false;
-      bSend.textContent = '发送';
-      renderChat();
     };
     bSend.onclick = () => { if (!bSend.disabled) send(ta.value); };
     ta.onkeydown = e => {
@@ -4697,53 +4775,271 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
   }
 
   /* ---------------- 渲染：报告 ---------------- */
-  function renderReport() {
-    const pane = $('#pane'), r = S.res;
-    pane.innerHTML = '';
-    const bar = el('div', { style: 'display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap' });
-    const b1 = el('button', { class: 'ghost mini', text: '下载 Markdown' });
-    b1.onclick = () => download(`DAC报告_${stamp()}.md`, r.reportWithEvidence || r.report, 'text/markdown');
-    const b2 = el('button', { class: 'ghost mini', text: '下载 JSON' });
-    b2.onclick = () => download(`DAC结果_${stamp()}.json`, JSON.stringify(r, null, 2), 'application/json');
-    const b3 = el('button', { class: 'ghost mini', text: '打印 / 存 PDF' });
-    b3.onclick = () => window.print();
-    const b4 = el('button', { class: 'ghost mini', text: '导出校准后数据 CSV' });
-    b4.onclick = () => {
-      const r2 = S.res;
-      const head = ['样本', ...r2.meta.factors.map(f => f + '_等级'), r2.meta.target + '_等级'];
-      const idxT = S.columns.indexOf(r2.meta.target);
-      const idxF = r2.meta.factors.map(f => S.columns.indexOf(f));
-      const keep = S.rows.filter(x => C.isNum(x[idxT]) && idxF.every(j => C.isNum(x[j])));
-      const L = r2.calibration.labels;
-      const rows = keep.map((x, i) => {
-        const codes = r2.meta.factors.map(f => r2.calibration.factors[f].codes[i]).concat([r2.calibration.target.codes[i]]);
-        return [i + 1, ...codes.map(c => L[c] ?? c)];
+  /**
+   * 流式调用（SSE）。边收边回调，让用户立刻看到字在动，而不是干等。
+   *
+   * 与 callLLM 的差别：
+   *   · 不重试（流已经开始了，重试会重复输出）；由调用方决定要不要退回非流式
+   *   · 支持 onDelta({ content, reasoning }) 增量回调
+   *   · 支持 AbortSignal，用户点「停止」能真的停
+   *
+   * @param {Array} messages
+   * @param {object} opt  { signal, onDelta, temperature, maxTokens, timeoutMs }
+   * @returns {Promise<{content, reasoning, finishReason, usage, model, streamed}>}
+   */
+  async function callLLMStream(messages, opt) {
+    const o = opt || {};
+    const c = aiCfg();
+    if (!c.key) throw new Error('还没填 API Key（在「接入设置」里填）');
+    const prov = c.provider || 'deepseek';
+    const base = (c.baseURL || PROVIDERS[prov].base).replace(/\/+$/, '');
+    const model = c.model || PROVIDERS[prov].model;
+    const maxTokens = o.maxTokens || MAX_TOKENS_BY_PROVIDER[prov] || 3000;
+
+    const ctrl = new AbortController();
+    if (o.signal) {
+      if (o.signal.aborted) ctrl.abort();
+      else o.signal.addEventListener('abort', () => ctrl.abort(), { once: true });
+    }
+    // 流式下超时只约束"多久没收到新数据"，不是总时长
+    let idleTimer = null;
+    const resetIdle = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => ctrl.abort(), o.idleTimeoutMs || 45000);
+    };
+    resetIdle();
+
+    let res;
+    try {
+      res = await fetch(base + '/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + c.key },
+        body: JSON.stringify({
+          model, messages,
+          temperature: o.temperature === undefined ? 0.2 : o.temperature,
+          max_tokens: maxTokens,
+          stream: true
+        }),
+        signal: ctrl.signal
       });
-      download(`DAC校准数据_${stamp()}.csv`, '\ufeff' + C.toCSV(head, rows), 'text/csv');
+    } catch (e) {
+      if (idleTimer) clearTimeout(idleTimer);
+      if (e && e.name === 'AbortError') {
+        const err = new Error('已停止');
+        err.aborted = true;
+        throw err;
+      }
+      throw new Error('网络请求失败：' + ((e && e.message) || String(e)));
+    }
+
+    if (!res.ok) {
+      if (idleTimer) clearTimeout(idleTimer);
+      const t = await res.text().catch(() => '');
+      const err = new Error('HTTP ' + res.status + '：' + t.slice(0, 300));
+      err.status = res.status;
+      const ra = res.headers && res.headers.get ? res.headers.get('Retry-After') : null;
+      if (ra) {
+        const sec = Number(ra);
+        if (Number.isFinite(sec)) err.retryAfterMs = sec * 1000;
+      }
+      throw err;
+    }
+
+    // 有的中转站忽略 stream=true，直接返回完整 JSON —— 这里要能接住
+    const ct = (res.headers && res.headers.get ? res.headers.get('Content-Type') : '') || '';
+    if (!res.body || /application\/json/i.test(ct)) {
+      if (idleTimer) clearTimeout(idleTimer);
+      const raw = await res.text().catch(() => '');
+      let j = null;
+      try { j = JSON.parse(raw); } catch (e) { }
+      const ch = j && j.choices && j.choices[0];
+      if (!ch) throw new Error('返回既不是流也不是合法 JSON：' + raw.slice(0, 200));
+      const content = ((ch.message && ch.message.content) || '').trim();
+      const reasoning = ((ch.message && ch.message.reasoning_content) || '').trim();
+      if (content && typeof o.onDelta === 'function') o.onDelta({ content, reasoning: '' });
+      return { content, reasoning: reasoning || null, finishReason: ch.finish_reason || null,
+        usage: (j && j.usage) || {}, model, streamed: false };
+    }
+
+    const reader = res.body.getReader();
+    const dec = new TextDecoder('utf-8');
+    let buf = '';
+    let content = '';
+    let reasoning = '';
+    let finish = null;
+    let usage = {};
+    let firstTokenMs = null;
+    const t0 = Date.now();
+
+    try {
+      for (;;) {
+        // 显式检查：不能假设底层 fetch 一定会把 signal 传到 body 流上
+        // （部分中转/代理会忽略 signal，导致点了"停止"却继续收）
+        if (ctrl.signal.aborted) {
+          const err = new Error(content ? '已停止（已收到的部分保留）' : '已停止');
+          err.aborted = true;
+          err.partial = content;
+          throw err;
+        }
+        const { done, value } = await reader.read();
+        if (done) break;
+        resetIdle();
+        buf += dec.decode(value, { stream: true });
+
+        // SSE：事件之间用空行分隔
+        let idx;
+        while ((idx = buf.indexOf('\n\n')) >= 0) {
+          const block = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          for (const line of block.split('\n')) {
+            const ln = line.trim();
+            if (!ln || ln.startsWith(':')) continue;
+            if (!ln.startsWith('data:')) continue;
+            const payload = ln.slice(5).trim();
+            if (payload === '[DONE]') { finish = finish || 'stop'; continue; }
+            let obj;
+            try { obj = JSON.parse(payload); } catch (e) { continue; }
+            if (obj.usage) usage = obj.usage;
+            const ch = obj.choices && obj.choices[0];
+            if (!ch) continue;
+            if (ch.finish_reason) finish = ch.finish_reason;
+            const d = ch.delta || {};
+            const dc = d.content || '';
+            const dr = d.reasoning_content || d.reasoning || '';
+            if (dr) {
+              reasoning += dr;
+              if (typeof o.onDelta === 'function') o.onDelta({ content: '', reasoning: dr });
+            }
+            if (dc) {
+              if (firstTokenMs === null) firstTokenMs = Date.now() - t0;
+              content += dc;
+              if (typeof o.onDelta === 'function') o.onDelta({ content: dc, reasoning: '' });
+            }
+          }
+        }
+      }
+    } catch (e) {
+      if (e && e.name === 'AbortError') {
+        const err = new Error(content ? '已停止（已收到的部分保留）' : '已停止');
+        err.aborted = true;
+        err.partial = content;
+        throw err;
+      }
+      throw e;
+    } finally {
+      if (idleTimer) clearTimeout(idleTimer);
+      try { reader.releaseLock(); } catch (e) { }
+    }
+
+    if (!content.trim()) {
+      const why = reasoning
+        ? `模型只输出了推理过程、正文为空（finish=${finish || '?'}）。这是推理型模型的常见现象：token 被 thinking 消耗完。`
+        : `模型返回空正文（finish=${finish || '?'}）。可能是模型拒答、参数不被接受或服务端异常。`;
+      const err = new Error(why);
+      err.emptyBody = true;
+      throw err;
+    }
+
+    return { content: content.trim(), reasoning: reasoning.trim() || null,
+      finishReason: finish, usage, model, streamed: true, firstTokenMs };
+  }
+
+  /**
+   * 把流式增量渲染进一个气泡：思考块折叠 + 正文逐字。
+   * 返回一个句柄，调用方负责 stop() / finish()。
+   */
+  function makeStreamBubble(container) {
+    const box = el('div', { class: 'ai-msg busy' });
+
+    const think = el('details', { class: 'ai-think' });
+    const thinkSum = el('summary', { text: '思考过程（0 字）' });
+    const thinkPre = el('pre', { text: '' });
+    think.appendChild(thinkSum);
+    think.appendChild(thinkPre);
+    think.style.display = 'none';
+
+    const body = el('div', {});
+    const status = el('div', { class: 'muted', style: 'font-size:11.5px;margin-top:7px' });
+    const btnStop = el('button', { class: 'ghost mini', text: '停止', style: 'margin-top:7px' });
+
+    box.appendChild(think);
+    box.appendChild(body);
+    box.appendChild(status);
+    box.appendChild(btnStop);
+    container.appendChild(box);
+
+    let thinkChars = 0, bodyChars = 0;
+    const t0 = Date.now();
+    const tick = setInterval(() => {
+      const sec = ((Date.now() - t0) / 1000).toFixed(1);
+      const tps = bodyChars > 0 ? (bodyChars / Math.max(0.001, (Date.now() - t0) / 1000)).toFixed(0) : '0';
+      status.textContent = bodyChars
+        ? `生成中 ${sec}s · 已 ${bodyChars} 字 · ${tps} 字/秒`
+        : (thinkChars ? `思考中 ${sec}s · 已 ${thinkChars} 字` : `等待响应 ${sec}s`);
+    }, 200);
+
+    const paint = () => {
+      // 正文按行做轻量排版：标题行加色、列表缩进
+      body.textContent = '';
+      const txt = body.dataset.text || '';
+      if (!txt) return;
+      const lines = txt.split('\n');
+      lines.forEach((ln, i) => {
+        const t = ln.trim();
+        let node;
+        if (/^【.+】$/.test(t)) node = el('span', { class: 'ai-h', text: ln });
+        else if (/^[-*·]\s+/.test(t) || /^\d+[.)]\s+/.test(t)) node = el('span', { class: 'ai-li', text: ln });
+        else node = el('span', { text: ln });
+        body.appendChild(node);
+        if (i < lines.length - 1) body.appendChild(document.createTextNode('\n'));
+      });
     };
-    const bX = el('button', { class: 'ghost mini', text: '导出 Excel（xlsx）' });
-    bX.onclick = async () => {
-      try {
-        const r2 = S.res;
-        const idxT = S.columns.indexOf(r2.meta.target);
-        const idxF = r2.meta.factors.map(f => S.columns.indexOf(f));
-        const keep = S.rows.filter(x => C.isNum(x[idxT]) && idxF.every(j => C.isNum(x[j])));
-        const L2 = r2.calibration.labels;
-        const head = ['样本', ...r2.meta.factors.map(f => f + '_等级'), r2.meta.target + '_等级'];
-        const rows = keep.map((x, i) => {
-          const codes = r2.meta.factors.map(f => r2.calibration.factors[f].codes[i])
-            .concat([r2.calibration.target.codes[i]]);
-          return [i + 1, ...codes.map(c => L2[c] ?? c)];
-        });
-        const buf = await C.toXLSX(head, rows, 'DAC校准数据');
-        const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-        const a = el('a', { href: URL.createObjectURL(blob), download: `DAC校准数据_${stamp()}.xlsx` });
-        document.body.appendChild(a); a.click(); a.remove();
-        setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-        toast('Excel 已生成');
-      } catch (e) { toast('导出失败：' + e.message, 5000); }
+
+    return {
+      box,
+      onDelta(d) {
+        if (d.reasoning) {
+          thinkChars += d.reasoning.length;
+          think.style.display = '';
+          thinkPre.textContent += d.reasoning;
+          thinkSum.textContent = `思考过程（${thinkChars} 字，点开看）`;
+        }
+        if (d.content) {
+          bodyChars += d.content.length;
+          body.dataset.text = (body.dataset.text || '') + d.content;
+          paint();
+          container.scrollTop = container.scrollHeight;
+        }
+      },
+      stopButton: btnStop,
+      stop() { clearInterval(tick); btnStop.remove(); box.classList.remove('busy'); },
+      finish(finalText, metaText) {
+        clearInterval(tick);
+        btnStop.remove();
+        box.classList.remove('busy');
+        if (finalText !== undefined && finalText !== null) {
+          body.dataset.text = finalText;
+          paint();
+        }
+        const sec = ((Date.now() - t0) / 1000).toFixed(1);
+        status.textContent = metaText || `完成 ${sec}s`;
+        if (!thinkChars) think.remove();
+        return box;
+      },
+      error(msg) {
+        clearInterval(tick);
+        btnStop.remove();
+        box.classList.remove('busy');
+        box.classList.add('err');
+        body.textContent = msg;
+        status.textContent = '';
+        if (!thinkChars) think.remove();
+        return box;
+      }
     };
-    /**
+  }
+
+  /**
    * 把 Markdown 报告转成 DOCX blocks。
    * 只处理报告里实际用到的语法：# 标题、- 列表、| 表格 |、普通段落、**粗体**（去掉标记）。
    * 复杂语法（嵌套列表、代码块）不处理——报告里本来也没有。
@@ -4804,7 +5100,53 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
     return out;
   }
 
-  async function exportDOCX() {
+  function renderReport() {
+    const pane = $('#pane'), r = S.res;
+    pane.innerHTML = '';
+    const bar = el('div', { style: 'display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap' });
+    const b1 = el('button', { class: 'ghost mini', text: '下载 Markdown' });
+    b1.onclick = () => download(`DAC报告_${stamp()}.md`, r.reportWithEvidence || r.report, 'text/markdown');
+    const b2 = el('button', { class: 'ghost mini', text: '下载 JSON' });
+    b2.onclick = () => download(`DAC结果_${stamp()}.json`, JSON.stringify(r, null, 2), 'application/json');
+    const b3 = el('button', { class: 'ghost mini', text: '打印 / 存 PDF' });
+    b3.onclick = () => window.print();
+    const b4 = el('button', { class: 'ghost mini', text: '导出校准后数据 CSV' });
+    b4.onclick = () => {
+      const r2 = S.res;
+      const head = ['样本', ...r2.meta.factors.map(f => f + '_等级'), r2.meta.target + '_等级'];
+      const idxT = S.columns.indexOf(r2.meta.target);
+      const idxF = r2.meta.factors.map(f => S.columns.indexOf(f));
+      const keep = S.rows.filter(x => C.isNum(x[idxT]) && idxF.every(j => C.isNum(x[j])));
+      const L = r2.calibration.labels;
+      const rows = keep.map((x, i) => {
+        const codes = r2.meta.factors.map(f => r2.calibration.factors[f].codes[i]).concat([r2.calibration.target.codes[i]]);
+        return [i + 1, ...codes.map(c => L[c] ?? c)];
+      });
+      download(`DAC校准数据_${stamp()}.csv`, '\ufeff' + C.toCSV(head, rows), 'text/csv');
+    };
+    const bX = el('button', { class: 'ghost mini', text: '导出 Excel（xlsx）' });
+    bX.onclick = async () => {
+      try {
+        const r2 = S.res;
+        const idxT = S.columns.indexOf(r2.meta.target);
+        const idxF = r2.meta.factors.map(f => S.columns.indexOf(f));
+        const keep = S.rows.filter(x => C.isNum(x[idxT]) && idxF.every(j => C.isNum(x[j])));
+        const L2 = r2.calibration.labels;
+        const head = ['样本', ...r2.meta.factors.map(f => f + '_等级'), r2.meta.target + '_等级'];
+        const rows = keep.map((x, i) => {
+          const codes = r2.meta.factors.map(f => r2.calibration.factors[f].codes[i])
+            .concat([r2.calibration.target.codes[i]]);
+          return [i + 1, ...codes.map(c => L2[c] ?? c)];
+        });
+        const buf = await C.toXLSX(head, rows, 'DAC校准数据');
+        const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+        const a = el('a', { href: URL.createObjectURL(blob), download: `DAC校准数据_${stamp()}.xlsx` });
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+        toast('Excel 已生成');
+      } catch (e) { toast('导出失败：' + e.message, 5000); }
+    };
+    async function exportDOCX() {
     const r = S.res;
     if (!r) { toast('先跑一次分析'); return; }
     try {
