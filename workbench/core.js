@@ -652,6 +652,7 @@
       meanMu,
       ambiguousRate: amb / Math.max(1, n),
       lo, hi, levels,
+      degenerate: !(hi > lo),
       labels: LEVEL_LABELS[levels]
     };
   }
@@ -662,9 +663,18 @@
    */
   function calibrateWith(values, bounds, opt) {
     const { levels = 3, drops = 500, seed = 42 } = opt || {};
-    const lo = bounds.lo, hi = bounds.hi;
-    if (!Number.isFinite(lo) || !Number.isFinite(hi) || !(hi > lo)) {
+    let lo = bounds.lo, hi = bounds.hi;
+    if (!Number.isFinite(lo) || !Number.isFinite(hi)) {
       throw new Error(`校准上下界非法: lo=${lo}, hi=${hi}`);
+    }
+    // 常量列（lo === hi）不该让整条流水线崩：
+    // - 条件变量：给它一个极小跨度，下游会把它当成"无信息列"
+    // - 目标变量：标记 degenerate，由调用方决定是否继续
+    let degenerate = false;
+    if (!(hi > lo)) {
+      degenerate = true;
+      const eps = Math.max(1e-9, Math.abs(lo) * 1e-9, 1e-12);
+      hi = lo + eps;
     }
     const { clouds } = buildClouds(lo, hi, levels);
     const { codes, muMax, mu2 } = assignCodes(values, clouds, levels, drops, seed);
@@ -679,6 +689,7 @@
       ambiguousRate: valid.length ? muMax.filter((m, i) => m - mu2[i] < 0.15).length / valid.length : 0,
       lo, hi, levels,
       labels: LEVEL_LABELS[levels],
+      degenerate,
       fromBounds: true
     };
   }

@@ -66,10 +66,38 @@ test('calibrateWith 不重算分位数，只按给定界打分', () => {
   eq(extreme.codes[0], 2, '超界值应归入最高档');
 });
 
-test('calibrateWith 界非法时抛错', () => {
-  let threw = false;
-  try { C.calibrateWith([1], { lo: 5, hi: 5 }, { levels: 3 }); } catch (e) { threw = /非法/.test(e.message); }
-  assert(threw, 'hi <= lo 应抛错');
+// 契约变更（V4.6）：lo === hi 属于「常量列」这种合法数据，不该整条流水线崩；
+// 但必须标记 degenerate，让下游知道这一列没有信息。
+// 真正非法的输入（NaN / Infinity）仍然抛错。
+test('calibrateWith 非有限界抛错', () => {
+  let threw1 = false, threw2 = false;
+  try { C.calibrateWith([1], { lo: NaN, hi: 5 }, { levels: 3 }); } catch (e) { threw1 = /非法/.test(e.message); }
+  try { C.calibrateWith([1], { lo: 0, hi: Infinity }, { levels: 3 }); } catch (e) { threw2 = /非法/.test(e.message); }
+  assert(threw1, 'lo = NaN 应抛错');
+  assert(threw2, 'hi = Infinity 应抛错');
+});
+
+test('calibrateWith 常量列降级但不崩', () => {
+  const r = C.calibrateWith([5, 5, 5], { lo: 5, hi: 5 }, { levels: 3, drops: 50, seed: 42 });
+  assert(r.degenerate === true, 'lo === hi 应标记 degenerate');
+  assert(Number.isFinite(r.lo) && Number.isFinite(r.hi), 'lo/hi 必须仍是有限数');
+  assert(r.hi > r.lo, '内部应给一个极小跨度，避免下游除 0');
+  assert(r.codes.every(c => Number.isFinite(c)), 'codes 不得为 NaN');
+  // 常量列不该被切成多个等级：所有样本应落在同一个码
+  const uniq = new Set(r.codes);
+  assert(uniq.size === 1, '常量列应全部落在同一等级，实际 ' + JSON.stringify([...uniq]));
+});
+
+test('calibrateWith 反向界（lo > hi）不产生 NaN', () => {
+  let r = null, err = null;
+  try { r = C.calibrateWith([1, 2, 3], { lo: 10, hi: 0 }, { levels: 3, drops: 50, seed: 42 }); }
+  catch (e) { err = e; }
+  // 要么明确报错，要么给出有限结果；不允许静默产生 NaN
+  if (!err) {
+    assert(r.codes.every(c => Number.isFinite(c)), 'codes 不得为 NaN');
+  } else {
+    assert(/非法/.test(err.message), '若报错，应说明是界的非法');
+  }
 });
 
 test('严格 CV 的分位数界落在训练折值域内', () => {
