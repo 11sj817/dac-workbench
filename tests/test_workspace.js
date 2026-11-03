@@ -80,6 +80,13 @@ function check(name,f){f();pass++;console.log('PASS '+name);}
  check('all result pages render without JavaScript errors',()=>assert.deepEqual(errors,[]));
  tab('report');
  check('reports can be downloaded',()=>assert.ok(button('Word')||button('DOCX')));
+ const parameters=await exportFile('导出项目（仅参数');
+ const paramsProject=JSON.parse(parameters.bytes.toString('utf8'));
+ check('parameter-only project does not smuggle raw sample rows through metadata',()=>{
+  assert.equal(paramsProject.dataset.data,null);
+  assert.ok(!Object.hasOwn(paramsProject.dataset.meta,'rows'));
+  assert.ok(!Object.hasOwn(paramsProject.dataset.meta,'data'));
+ });
 
  // Actual file-change and import-preview path, then six-class target.
  const csv='chosen,discard,outcome\n'+Array.from({length:120},(_,i)=>`${Math.sin(i)},${i%6},${10*(1+i%6)}`).join('\n');
@@ -148,7 +155,7 @@ function check(name,f){f();pass++;console.log('PASS '+name);}
  const project=JSON.parse(exported.bytes.toString('utf8'));
  check('project export contains data, type, selected variables and a data fingerprint',()=>{
   assert.equal(project.format,'dac-project/2.7');
-  assert.equal(project.app.version,'6.5.0');
+  assert.equal(project.app.version,JSON.parse(fs.readFileSync(path.join(root,'package.json'),'utf8')).version);
   assert.equal(project.dataset.data.length,120);assert.ok(project.dataset.hash);
   assert.deepEqual(project.selections.factors,['chosen']);
  });

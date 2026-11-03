@@ -125,6 +125,43 @@ select:focus,input:focus,textarea:focus{border-color:var(--acc)}
 .summary ul{padding-left:18px;margin:0}
 .summary li{font-size:12px;margin:6px 0;line-height:1.9;color:var(--txt)}
 .summary b{font-weight:650;color:var(--txt)}
+.summary>summary{cursor:pointer;display:flex;align-items:center;gap:12px;font-size:13px;font-weight:650;min-height:24px}
+.summary>summary::before{content:"+";font:20px/1 Consolas,monospace;color:var(--acc2)}
+.summary[open]>summary::before{content:"−"}
+.summary>summary span{color:var(--dim);font-size:11px;font-weight:400;margin-left:auto}
+.summary[open]>summary{padding-bottom:12px;margin-bottom:10px;border-bottom:1px solid var(--line)}
+.evidence-strip{display:grid;grid-template-columns:1.2fr 1fr 1fr;gap:16px;border:1px solid var(--line);border-radius:9px;padding:14px 16px;margin-bottom:12px;background:var(--panel2)}
+.evidence-strip small{display:block;color:var(--dim);font-size:11px;margin-bottom:4px}
+.evidence-strip strong{display:block;font-size:12px;font-weight:600;overflow-wrap:anywhere}
+#sourceBadge[data-kind=public]{color:var(--ok)}
+#sourceBadge[data-kind=synthetic],#sourceBadge[data-kind=unverified]{color:var(--warn)}
+.source-details{font-size:12px;margin-bottom:20px;color:var(--dim);border-bottom:1px solid var(--line);padding:0 2px 12px}
+.source-details>summary{cursor:pointer;min-height:28px;list-style-position:inside}
+.source-details code{display:block;font-size:11px;overflow-wrap:anywhere;line-height:1.8;color:var(--txt)}
+.source-details p{max-width:75ch;margin:10px 0}
+.calibration-method>summary{cursor:pointer;color:var(--txt);font-weight:600}
+.calibration-method[open]>summary{margin-bottom:10px}
+.mobile-workflow{display:none}
+@media(max-width:1020px){
+  .mobile-workflow{display:flex;align-items:center;gap:10px;padding:10px 16px;background:var(--panel);border-bottom:1px solid var(--line)}
+  .mobile-workflow>span{flex:1;font-size:13px;font-weight:600;min-width:0}
+  .mobile-workflow button{min-height:44px;min-width:64px}
+}
+@media(max-width:600px){
+  .evidence-strip{grid-template-columns:1fr 1fr;gap:12px;padding:12px}
+  .evidence-strip>div:first-child{grid-column:1/-1;border-bottom:1px solid var(--line);padding-bottom:9px}
+  .evidence-strip small{font-size:12px}.evidence-strip strong{font-size:13px}
+  .source-details{font-size:13px}.source-details>summary{min-height:44px;padding-top:9px}
+  .summary>summary{display:block;min-height:44px;font-size:14px}
+  .summary>summary span{display:block;font-size:12px;margin:5px 0 0 17px}
+  button,#tabs button{min-height:44px}
+  #tabs button{font-size:13px}
+  .mobile-workflow{padding:8px 12px;gap:8px}
+  .mobile-workflow>span{font-size:12px}
+  .mobile-workflow button{font-size:13px;padding:7px 10px}
+  body{padding-bottom:calc(46px + env(safe-area-inset-bottom))}
+  .statusbar{padding-bottom:env(safe-area-inset-bottom);height:calc(34px + env(safe-area-inset-bottom))}
+}
 .warnline{color:var(--warn)}
 .resultbar{display:flex;align-items:center;flex-wrap:wrap;gap:7px;border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-bottom:18px;background:var(--panel2)}
 table{width:100%;border-collapse:collapse;font-size:12px}
@@ -178,6 +215,14 @@ svg{max-width:100%;height:auto;display:block}
 @media(max-width:800px){.app-header{padding:0 16px}.brand{flex-basis:auto}.header-actions #dsTag{display:inline-block;max-width:140px}#status{display:none}.workspace-heading{margin:0 16px;padding:21px 0 18px}.workspace-heading h2{font-size:22px}.wrap{margin-left:0;grid-template-columns:244px minmax(0,1fr);gap:14px;padding:0 16px 24px}#tabs{position:static;width:auto;flex-direction:row;overflow-x:auto;flex-wrap:nowrap;gap:5px;padding:0 0 13px;margin:0 0 16px;background:transparent;border:0;scrollbar-width:thin}#tabs button{width:auto;flex:0 0 auto;border:1px solid var(--line);padding:7px 11px;color:var(--dim);background:var(--panel)}#tabs button.on{background:var(--acc);color:#fff;border-color:var(--acc)}#tabs button::before,.nav-caption,.nav-section,.nav-footer{display:none}.result-column>.card{padding:16px;min-height:530px}.method-grid{grid-template-columns:1fr}.result-heading{padding-bottom:13px;margin-bottom:16px}.resultbar .grow{display:none}.resultbar .muted{width:100%}}
 @media(max-width:600px){html,body{max-width:100%;overflow-x:clip}.app-header{height:60px;gap:8px;padding:0 13px}.brand{gap:8px}.brand-mark{width:29px;height:32px;font-size:22px}.brand h1{font-size:16px}.brand small{font-size:9px;letter-spacing:.6px}.header-actions{gap:5px}.header-actions #dsTag{display:none}#btnTheme,#btnPalette{font-size:11px;padding:6px 8px}.workspace-heading{margin:0 14px;padding:18px 0 16px}.workspace-heading h2{font-size:20px}.workspace-heading p{font-size:11px}.workspace-heading>button{display:none}.wrap{display:flex;flex-direction:column;padding:0 12px 24px;gap:0}.config-column,.result-column{width:100%;min-width:0}.card{padding:15px;margin-bottom:13px;border-radius:10px}.config-column{display:grid;grid-template-columns:1fr}.method-note{display:none}#analysisContext{display:none}.result-column>.card{padding:15px;min-height:0}#tabs{margin-bottom:13px;padding-bottom:11px}.result-heading{gap:8px}.result-heading h2{font-size:16px}.welcome-lead h3{font-size:24px!important}.welcome-lead>p{font-size:12px}.method-grid{grid-template-columns:1fr 1fr;gap:9px}.method-card{padding:12px}.method-card h4{font-size:12px}.method-card p{font-size:11px}.method-card small{font-size:9px}.method-card .method-symbol{width:26px;height:26px;margin-bottom:7px}.grid2{grid-template-columns:1fr}#pane table,.tablewrap{display:block;max-width:100%;overflow-x:auto}#pane svg{max-width:100%!important;height:auto!important}.stat{gap:8px}.stat>div{min-width:42%;padding:10px 12px}.stat b{font-size:21px}.summary{padding:12px 13px}.summary li{font-size:11.5px}.resultbar{padding:9px}.statusbar{padding:0 12px;gap:6px}.sb-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:62vw}.sb-hint{font-size:9px}.drop{padding:18px 10px}.welcome-foot{gap:8px;font-size:10px}label.row{font-size:12px}input[type=number],input[type=text],input[type=password],select,textarea{font-size:16px}#factors{max-height:140px!important}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+.nav-icon{width:18px;height:18px;flex:0 0 18px}
+#tabs button::before{display:none}
+@media(max-width:600px){
+  body{font-size:16px}.method-grid{grid-template-columns:1fr}
+  .method-card p{font-size:13px}.method-card h4{font-size:14px}.method-card small{font-size:11px}
+  .welcome-lead>p{font-size:14px}.workspace-heading p{font-size:13px}
+  .statusbar{padding-bottom:env(safe-area-inset-bottom);height:calc(34px + env(safe-area-inset-bottom))}.statusbar button{min-height:24px}
+}
 @media print{header,#tabs,.config-column,.workspace-heading,.resultbar,.statusbar,.toast,.result-heading{display:none!important}.wrap{display:block;margin:0;padding:0}.result-column>.card{border:0;padding:0;box-shadow:none}body{background:#fff;color:#111;padding:0}pre{max-height:none}}
 </style>
 </head>
@@ -202,6 +247,11 @@ svg{max-width:100%;height:auto;display:block}
     <button id="btnPalette" title="外观设置" aria-label="打开外观设置">外观</button>
   </div>
 </header>
+<nav class="mobile-workflow" aria-label="分析步骤导航">
+  <button class="ghost" id="mobileStepPrev" disabled>上一步</button>
+  <span id="mobileStepLabel" role="status" aria-live="polite">1 / 5 · 导入数据</span>
+  <button id="mobileStepNext" disabled>下一步</button>
+</nav>
 <section class="workspace-heading" aria-label="工作区">
   <div><span class="eyebrow">DATA → DISCOVERY</span><h2>从数据，到可复核的发现。</h2>
     <p id="workspaceSubtitle">导入表格，探索分型、组合规则与变量关系。</p></div>
@@ -254,11 +304,12 @@ svg{max-width:100%;height:auto;display:block}
       <input type="range" id="drops" min="100" max="1000" step="50" value="500">
       <label class="row">离散等级 <b id="vLevels">3</b></label>
       <input type="range" id="levels" min="2" max="4" value="3">
-      <div class="hint">
+      <details class="hint calibration-method">
+        <summary>校准方法与参数含义</summary>
         <b>Ex</b> = 分位区间中点（构造）；<b>En</b> = 半区间 /(3×等级数)（构造，使 3En 约等于半个等级宽）；<b>He</b> = En/10（构造）。
         <br><span class="muted">三者都是按分位数<b>构造</b>的，不是从数据估计的云参数。逆向云算法（从样本估 Ex/En/He）本工具未实现。
         He = En/10 只是常见设定，不是云模型的定义性公式；由于它是 En 的固定比例，在本工具里不携带额外信息，因此不用于变量间比较或排名。</span>
-      </div>
+      </details>
       <button id="next3" style="width:100%;margin-top:10px">下一步：分析</button>
     </div>
 
@@ -310,10 +361,19 @@ svg{max-width:100%;height:auto;display:block}
         <span class="nav-section">辅助工具</span>
         <button data-icon="✧" data-tab="ai">AI 助手</button>
         <button data-icon="↗" data-tab="report">导出报告</button>
-        <div class="nav-footer">V6.5 · RESEARCH BETA</div>
+        <div class="nav-footer">V6.6 · RESEARCH BETA</div>
       </nav>
       <div class="result-heading"><div><h2 id="paneTitle">开始一次分析</h2><p id="paneDescription">从研究问题出发，逐步建立分析依据。</p></div><span class="tag" id="analysisState">准备数据</span></div>
-      <div class="summary" id="summary" style="display:none"></div>
+      <section class="evidence-strip" aria-label="数据与验证状态">
+        <div><small>数据来源</small><strong id="sourceBadge" data-kind="unverified">等待数据</strong></div>
+        <div><small>当前数据</small><strong id="sourceSize">尚未载入</strong></div>
+        <div><small>泛化验证</small><strong id="validationBadge">等待分析</strong></div>
+      </section>
+      <details class="source-details" id="sourceDetails">
+        <summary>来源、许可与核验记录</summary>
+        <div id="sourceDetailsBody"><p>选择示例或导入文件后，在这里核对来源与使用边界。</p></div>
+      </details>
+      <details class="summary" id="summary" style="display:none"></details>
       <div id="pane" tabindex="-1"></div>
     </div>
   </section>

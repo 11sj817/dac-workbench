@@ -1,0 +1,47 @@
+{
+  "checkedAt": "2026-11-03T13:07:25.5753902Z",
+  "datasets": [
+    {
+      "dataset": "iris",
+      "status": 200,
+      "license": "CC BY 4.0",
+      "linkPresent": true,
+      "route": "PowerShell HTTPS canonical source page"
+    },
+    {
+      "dataset": "abalone",
+      "status": 200,
+      "license": "CC BY 4.0",
+      "linkPresent": true,
+      "route": "PowerShell HTTPS canonical source page"
+    },
+    {
+      "dataset": "autompg",
+      "status": 200,
+      "license": "CC BY 4.0",
+      "linkPresent": true,
+      "route": "PowerShell HTTPS canonical source page"
+    },
+    {
+      "dataset": "wdbc",
+      "status": 200,
+      "license": "CC BY 4.0",
+      "linkPresent": true,
+      "route": "PowerShell HTTPS canonical source page"
+    },
+    {
+      "dataset": "wine",
+      "status": 200,
+      "license": "CC BY 4.0",
+      "linkPresent": true,
+      "route": "PowerShell HTTPS canonical source page"
+    },
+    {
+      "dataset": "student",
+      "status": 200,
+      "license": "CC BY 4.0",
+      "linkPresent": true,
+      "route": "PowerShell HTTPS canonical source page"
+    }
+  ]
+}

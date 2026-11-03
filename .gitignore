@@ -21,6 +21,9 @@ _*.py
 .chrome-live21/
 .chrome-live*/
 
+# Python verification intermediates
+__pycache__/
+
 # 本地浏览器测试环境（Firefox + geckodriver）
 _ff/
 node_modules/

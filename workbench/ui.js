@@ -51,13 +51,10 @@
         this.url = URL.createObjectURL(blob);
         this.worker = new Worker(this.url);
         this.worker.onmessage = ev => this._onMsg(ev.data);
-        this.worker.onerror = e => {
-          this.pending.forEach(t => { clearTimeout(t.timer); t.reject(new Error('Worker 崩溃: ' + (e.message || 'unknown'))); });
-          this.pending.clear();
-          this.worker = null;
-        };
+        this.worker.onerror = e => this.cancelAll('Worker 崩溃: ' + (e.message || 'unknown'));
         return this.worker;
       } catch (e) {
+        if (this.url) { URL.revokeObjectURL(this.url); this.url = null; }
         this.supported = false;
         return null;
       }
@@ -94,19 +91,22 @@
         }
         const id = ++this.seq;
         const timer = setTimeout(() => {
-          this.pending.delete(id);
-          reject(new Error('计算超时（' + ((o.timeoutMs || 120000) / 1000) + 's），已中断'));
+          // A rejected Promise does not stop CPU work: terminate the actual worker.
+          this.cancelAll('计算超时（' + ((o.timeoutMs || 120000) / 1000) + 's），已中断');
         }, o.timeoutMs || 120000);
         this.pending.set(id, { resolve, reject, timer, onProgress: o.onProgress, task });
-        w.postMessage({ id, task, payload });
+        try { w.postMessage({ id, task, payload }); }
+        catch (e) { this.cancelAll('任务发送失败：' + e.message); }
       });
     },
 
-    cancelAll() {
-      this.pending.forEach(t => { clearTimeout(t.timer); t.reject(new Error('已取消')); });
+    cancelAll(reason = '已取消') {
+      this.pending.forEach(t => { clearTimeout(t.timer); t.reject(new Error(reason)); });
       this.pending.clear();
       if (this.worker) { this.worker.terminate(); this.worker = null; }
       if (this.url) { URL.revokeObjectURL(this.url); this.url = null; }
+      const badge = document.getElementById('sb-worker');
+      if (badge) badge.textContent = this.supported ? '按需启动' : '主线程回退';
     }
   };
   window.__WK = WK;   // 调试用
@@ -260,8 +260,7 @@
       showImportPreview(file, text, re, v);
     };
     $('#impOk').onclick = () => {
-      S.fileName = file.name;
-      applyData(parsed, file.name);
+      if (!applyData(parsed, file.name)) return;
       // 把解析元信息挂到会话上，便于后续追溯
       S.importMeta = { file: file.name, delimiter: parsed.meta.delimiter, widthMismatch: parsed.meta.widthMismatch, skippedBlank: parsed.meta.skippedBlank, rowIds: parsed.meta.rowIds };
       toast(`已导入 ${parsed.rows.length} 行（分隔符 ${JSON.stringify(parsed.meta.delimiter)}）`);
@@ -270,12 +269,15 @@
   }
 
   async function loadFile(file) {
+    const request = S.importRequest = (S.importRequest || 0) + 1;
+    let applying = false;
     const ext = (file.name.split('.').pop() || '').toLowerCase();
     $('#dsInfo').textContent = '解析中…';
     try {
       let parsed;
       if (ext === 'csv' || ext === 'txt') {
         const text = await file.text();
+        if (request !== S.importRequest) return;
         parsed = C.parseCSV(text);
         // 先给预览，用户确认后再进分析
         showImportPreview(file, text, parsed, '');
@@ -284,24 +286,49 @@
         if (ext === 'xls') throw new Error('旧版 .xls 请另存为 .xlsx 或 .csv');
         const buf = await file.arrayBuffer();
         const sheets = await C.parseXLSXAll(buf);
+        if (request !== S.importRequest) return;
         const usable = sheets.filter(sh => !sh.empty);
         if (!usable.length) throw new Error('这个工作簿里没有可读的数据表');
-        S.sheets = usable;
-        S.sheetIdx = 0;
-        parsed = { columns: usable[0].columns, rows: usable[0].rows };
+        parsed = { columns: usable[0].columns, rows: usable[0].rows, sheets: usable };
         if (usable.length > 1) {
           toast(`检测到 ${usable.length} 个工作表，可在下方切换`);
         }
       } else throw new Error('只支持 .xlsx / .csv');
-      S.fileName = file.name;
+      applying = true;
       applyData(parsed, file.name);
     } catch (e) {
+      if (!applying && request !== S.importRequest) return;
       $('#dsInfo').textContent = '解析失败';
       toast('解析失败：' + e.message, 5000);
     }
   }
 
   const DS = window.__DATASETS__ || {};
+  // One stroke-based icon family; local SVG avoids font-dependent glyphs.
+  const navPaths = {
+    guide:'M3 10 12 3l9 7v10H3ZM9 20v-7h6v7',
+    profile:'M4 3h16v18H4ZM8 8h8M8 12h8M8 16h5',
+    quality:'M12 3 3 7v6c0 4 9 8 9 8s9-4 9-8V7ZM8 12l3 3 5-6',
+    corr:'M5 19V5M5 19h15M8 15l4-5 3 2 5-7',
+    calib:'M3 18c4 0 4-12 9-12s5 12 9 12M3 18h18M12 3v18',
+    scene:'M4 6h5v5H4ZM15 4h5v5h-5ZM9 15h5v5H9',
+    rules:'M12 3v5M5 12V8h14v4M5 12v8M19 12v8M2 20h6M16 20h6',
+    net:'M5 5l14 3-7 12ZM5 5l7 15M3 3h4v4H3ZM17 6h4v4h-4ZM10 18h4v4h-4',
+    bn:'M4 4h5v5H4ZM15 4h5v5h-5ZM9 16h6v5H9M7 9l5 7 5-7',
+    robust:'M4 7h16M4 12h16M4 17h16M8 4v6M16 9v6M10 14v6',
+    boot:'M4 8a8 8 0 1 1 0 8M4 3v5h5M12 7v5l3 2',
+    glm:'M3 20h18M5 16l4-7 4 4 6-10',
+    ai:'M4 5h16v12H9l-5 4ZM8 9h8M8 13h5',
+    report:'M4 3h10l6 6v12H4ZM14 3v6h6M8 14h8M8 18h5'
+  };
+  document.querySelectorAll('#tabs button').forEach(button => {
+    const path = navPaths[button.dataset.tab];
+    if (!path) return;
+    const icon = document.createElementNS('http://www.w3.org/2000/svg','svg');
+    for (const [key,value] of Object.entries({viewBox:'0 0 24 24',fill:'none',stroke:'currentColor','stroke-width':'1.6','stroke-linecap':'round','stroke-linejoin':'round','aria-hidden':'true',class:'nav-icon'})) icon.setAttribute(key,value);
+    const shape = document.createElementNS('http://www.w3.org/2000/svg','path');
+    shape.setAttribute('d',path);icon.appendChild(shape);button.prepend(icon);
+  });
   (function bindDsBadge() {
     const tag = document.getElementById('dsTag');
     if (!tag) return;
@@ -333,6 +360,7 @@
 
   /** 清空所有分析产物（换数据时必须调用，否则旧结果会残留） */
   function resetAnalysis(keepTab) {
+    invalidateResults();
     S.res = null;
     S.extra = {};
     S.target = null;
@@ -345,9 +373,15 @@
 
   function applyData(parsed, name, desc, meta) {
     if (!parsed.columns.length) return toast('文件里没有读到表格');
+    const numeric = C.numericCols(parsed.columns, parsed.rows);
+    if (numeric.length < 2) return toast('至少需要 2 个数值列；当前分析数据保持不变', 5000);
+    S.importRequest = (S.importRequest || 0) + 1;
     resetAnalysis();
     // 数据集语义元数据（目标推荐、类型、排除列、说明）——决定"研究问题"是什么
-    S.dsMeta = meta || null;
+    S.dsMeta = metadataOnly(meta);
+    S.fileName = parsed.fileName || name || '未命名数据';
+    S.sheets = parsed.sheets || null;
+    S.sheetIdx = parsed.sheetIdx ?? 0;
     S.targetType = 'auto';
     $('#targetType').value = 'auto';
     S.importMeta = null;
@@ -355,8 +389,8 @@
     S.rows = parsed.rows;
     S.rowsRaw = parsed.rows.map(r => r.slice());
     S.rowsWork = null;
-    S.numeric = C.numericCols(S.columns, S.rows);
-    if (S.numeric.length < 2) return toast('至少需要 2 个数值列', 5000);
+    S.numeric = numeric;
+    refreshOrigin();
 
     // 初始化变量角色：
     // 有元数据 → 用 recommendedTarget / roleHints / exclude
@@ -395,7 +429,7 @@
     }
     $('#dsInfo').innerHTML = `<b>${esc(name)}</b><br>${parsed.rows.length} 行 · ${parsed.columns.length} 列 · 数值列 ${S.numeric.length} 个`
       + metaLines.join('')
-      + (desc ? `<br><span class="muted">${desc}</span>` : '');
+      + (desc ? `<br><span class="muted">${esc(desc)}</span>` : '');
     $('#status').textContent = `${parsed.rows.length} 行已就绪`;
     const tag = $('#dsTag');
     if (tag) { tag.textContent = name.slice(0, 22); tag.classList.add('live'); }
@@ -429,6 +463,7 @@
     renderProfileDirect(prof);
     toast('数据已载入');
     try { window.scrollTo({ top: 0, behavior: 'smooth' }); } catch (e) { window.scrollTo(0, 0); }
+    return true;
   }
 
   function renderFactors() {
@@ -463,6 +498,55 @@
     return Object.assign({}, detected, { type: declared || detected.type, declared: !!declared });
   }
 
+  function metadataOnly(meta) {
+    if (!meta) return null;
+    const { rows, data, ...rest } = meta;
+    return rest;
+  }
+
+  function refreshOrigin() {
+    // Project metadata is user input. Only shipped, row-for-row matching content
+    // may inherit the source verification badge.
+    const rows = JSON.stringify(S.rows);
+    const columns = JSON.stringify(S.columns);
+    const found = Object.values(DS).find(d =>
+      JSON.stringify(d.columns) === columns && JSON.stringify(d.rows) === rows);
+    S.originRecord = found && found.provenance || null;
+    S.originName = found && found.name || S.fileName || '用户导入数据';
+    renderSourceDetails();
+  }
+
+  function sourceLabel() {
+    return S.originRecord?.kind === 'public' ? '官方样本已对账'
+      : S.originRecord?.kind === 'synthetic' ? '合成演示数据' : S.rows.length ? '用户数据 · 来源未核验' : '等待数据';
+  }
+
+  function renderSourceDetails() {
+    const node = $('#sourceDetailsBody');
+    if (!node) return;
+    node.replaceChildren();
+    const p = S.originRecord;
+    node.appendChild(txt('p', S.rows.length ? S.originName : '选择示例，或导入 CSV / XLSX。'));
+    if (!p) {
+      node.appendChild(txt('p', '上传文件只表示成功读取。平台无法据此确认收集过程、授权和内容真实性；请核对来源、时间范围、单位与匿名化处理。'));
+      return;
+    }
+    node.appendChild(txt('p', `${p.matchedRows}/${S.rows.length} 行已核对 · 母表 ${p.sourceRows} 行 · ${p.sampling}`));
+    node.appendChild(txt('p', p.comparison));
+    if (p.sourceUrl) node.appendChild(el('a', {
+      href: p.sourceUrl, target: '_blank', rel: 'noopener noreferrer', text: '查看 UCI 官方来源 ↗'
+    }));
+    node.appendChild(txt('p', p.license ? `${p.license} · 核验 ${p.checkedAt.slice(0,10)}` : '自制合成样本；无外部真实观测'));
+    node.appendChild(txt('code', '样本 SHA-256 · ' + p.sampleSha256));
+    node.appendChild(txt('p', p.limitations));
+    node.appendChild(el('button', {
+      class: 'ghost mini', text: '下载来源核验记录',
+      onclick: () => download('DAC_数据来源核验.json', JSON.stringify({
+        dataset: S.originName, provenance: p
+      }, null, 2), 'application/json')
+    }));
+  }
+
   function updateWorkspaceContext() {
     const ready = S.rows.length > 0;
     const n = (S.factors || []).length;
@@ -475,7 +559,26 @@
       ? `${S.rows.length} 行数据 · 目标：${S.target} · ${n} 个条件变量`
       : '导入表格，探索分型、组合规则与变量关系。';
     const state = document.getElementById('analysisState');
-    if (state) state.textContent = S.res ? '分析已完成' : ready ? '配置分析' : '准备数据';
+    if (state) state.textContent = S.busy ? '正在分析' : S.res ? '分析已完成' : ready ? '配置分析' : '准备数据';
+    const origin = $('#sourceBadge');
+    if (origin) {
+      origin.textContent = sourceLabel();
+      origin.dataset.kind = S.originRecord?.kind || 'unverified';
+    }
+    const size = $('#sourceSize');
+    if (size) size.textContent = ready ? `${S.rows.length} 行 × ${S.columns.length} 列` : '尚未载入';
+    const validation = $('#validationBadge');
+    const strict = S.extra.quality?.strict;
+    if (validation) validation.textContent = strict?.ok ? (S.rowsWork ? '模拟数据 CV 已运行' : '严格 CV 已运行')
+      : S.res ? '严格 CV 尚未运行' : '等待分析';
+    const mobileLabel = $('#mobileStepLabel');
+    if (mobileLabel) mobileLabel.textContent = `${S.step} / 5 · ${['','导入数据','选择变量','校准','分析','验证与导出'][S.step]}`;
+    const previous = $('#mobileStepPrev'), next = $('#mobileStepNext');
+    if (previous) previous.disabled = S.step === 1 || S.busy;
+    if (next) {
+      next.disabled = S.busy || !ready;
+      next.textContent = S.step === 4 ? '运行分析' : S.step === 5 ? '导出报告' : '下一步';
+    }
     const hint = document.getElementById('targetTypeHint');
     if (hint && ready) {
       const info = currentTargetInfo();
@@ -493,8 +596,17 @@
   };
 
   function invalidateResults() {
+    clearTimeout(debounceTimer);
+    if (S.runTimer) { clearTimeout(S.runTimer); S.runTimer = null; }
     WK.cancelAll();
+    S.busy = false;
+    $('#btnRun').disabled = false;
+    $('#btnRun').textContent = '运行完整分析';
+    $('#loadbar').classList.remove('on');
     S.res = null; S.extra = {}; S.rowsWork = null;
+    $('#summary').style.display = 'none';
+    $('#resultBar')?.remove();
+    setBusy(false, '配置已更改 · 等待运行');
     $('#status').textContent = '配置已更改 · 等待运行';
   }
 
@@ -557,10 +669,9 @@
       });
       sel.onchange = () => {
         const i = +sel.value;
-        S.sheetIdx = i;
         const sh = S.sheets[i];
         back.remove();
-        applyData({ columns: sh.columns, rows: sh.rows }, `${S.fileName || '上传文件'} · ${sh.name}`);
+        if (!applyData({ columns: sh.columns, rows: sh.rows, sheets: S.sheets, sheetIdx: i, fileName: S.fileName }, `${S.fileName || '上传文件'} · ${sh.name}`)) return;
         toast('已切换到工作表：' + sh.name);
       };
       box.appendChild(el('div', { style: 'margin-bottom:12px' }, [
@@ -638,6 +749,8 @@
   /* ---------------- 参数 ---------------- */
   const bind = (id, out, fmtFn) => {
     const s = $('#' + id);
+    const label = s.previousElementSibling;
+    if (label?.tagName === 'LABEL') label.htmlFor = id;
     s.oninput = () => { if (out) $('#' + out).textContent = fmtFn ? fmtFn(s.value) : s.value; };
   };
   bind('low', 'vLow', v => v + '%');
@@ -647,11 +760,17 @@
   bind('k', 'vK');
   bind('depth', 'vDepth');
   bind('net', 'vNet', v => (v / 100).toFixed(2));
+  $('#seed').previousElementSibling.htmlFor = 'seed';
 
   ['low', 'high', 'drops', 'levels', 'k', 'depth', 'net', 'seed'].forEach(id => {
     const n = $('#' + id);
-    n.addEventListener('input', () => { if (S.res) schedule(); });
-    n.addEventListener('change', () => { if (S.res) schedule(); });
+    const changed = () => {
+      if (S.res || S.busy) {
+        invalidateResults(); updateWorkspaceContext(); setTab(S.tab);
+      }
+    };
+    n.addEventListener('input', changed);
+    n.addEventListener('change', changed);
   });
 
   let debounceTimer = null;
@@ -672,6 +791,14 @@
   };
   $('#next3').onclick = () => { setStep(4); setTab('guide'); };
   $('#btnRun').onclick = () => run();
+  $('#mobileStepPrev').onclick = () => gotoStep(Math.max(1, S.step - 1));
+  $('#mobileStepNext').onclick = () => {
+    if (S.step === 2) $('#next2').click();
+    else if (S.step === 3) $('#next3').click();
+    else if (S.step === 4) run();
+    else if (S.step === 5) setTab('report');
+    else gotoStep(2);
+  };
 
   function readParams() {
     return {
@@ -683,6 +810,7 @@
   }
 
   function run() {
+    if (S.busy) return toast('分析正在运行，请稍候');
     if (!S.columns.length) return toast('先导入数据');
     let factors = pickedFactors();
     if (!factors.length) {
@@ -703,9 +831,16 @@
       toast('参数读取失败：' + (e && e.message || e) + '（请刷新页面重试）', 8000);
       return;
     }
+    invalidateResults();
+    S.busy = true;
+    $('#btnRun').disabled = true;
+    $('#btnRun').textContent = '正在分析…';
     $('#loadbar').classList.add('on');
+    setBusy(true, '正在分析 · 大样本计算可能需要片刻');
+    updateWorkspaceContext();
     const t0 = performance.now();
-    setTimeout(() => {
+    S.runTimer = setTimeout(() => {
+      S.runTimer = null;
       try {
         S.res = compute();
         S.extra = {};
@@ -728,9 +863,18 @@
         } catch (e) { /* 历史记录失败不影响分析 */ }
       } catch (e) {
         console.error(e);
+        S.res = null;
+        $('#status').textContent = '计算失败 · 请检查数据与配置';
+        updateSummary();
         toast('计算失败：' + e.message, 6000);
+      } finally {
+        S.busy = false;
+        $('#btnRun').disabled = false;
+        $('#btnRun').textContent = '运行完整分析';
+        setBusy(false, S.res ? '分析完成 · 建议运行严格 CV' : '等待重试');
+        updateWorkspaceContext();
+        $('#loadbar').classList.remove('on');
       }
-      $('#loadbar').classList.remove('on');
     }, 20);
   }
 
@@ -1141,6 +1285,16 @@
     const F = buildFindings(r);
     const M = buildMechanism(r);
     const L = [];
+    L.push('');
+    L.push('### 数据来源核验');
+    L.push('');
+    L.push('- 数据状态：' + sourceLabel());
+    if (S.originRecord) {
+      L.push('- 来源：' + (S.originRecord.sourceUrl || '项目内合成数据'));
+      L.push('- 核验时间：' + S.originRecord.checkedAt);
+      L.push('- 样本 SHA-256：' + S.originRecord.sampleSha256);
+      L.push('- 边界：' + S.originRecord.limitations);
+    } else L.push('- 用户导入数据的收集过程与内容真实性未由平台核验。');
     L.push('');
     L.push('## 七、观察');
     L.push('');
@@ -1614,7 +1768,7 @@
     const F = buildFindings(r);
     const M = buildMechanism(r);
 
-    let html = '<h4>结论摘要 · 自动生成（数字全部来自本地计算）</h4>';
+    let html = '<summary>分析摘要 <span>本地计算 · 展开查看发现与口径</span></summary>';
     html += '<div style="font-size:11.5px;color:var(--dim);margin:2px 0 6px">观察 · 这批数据支持什么、不支持什么</div>';
     html += '<ul>' + F.map(x => `<li><b style="color:var(--acc2)">${x.tag}</b>　${x.text}</li>`).join('') + '</ul>';
     if (M.length) {
@@ -1894,6 +2048,7 @@
   }
 
   function renderQuality() {
+    updateWorkspaceContext();
     const pane = $('#pane');
     const P = window.DACPre;
     pane.innerHTML = '';
@@ -1933,7 +2088,7 @@
         }
       });
       S.rowsWork = rows;
-      q.preview = null; q.strict = null; q.audit = null;
+      q.preview = null; q.strict = null; q.nested = null; q.audit = null;
       toast('已注入 ' + cnt + ' 个缺失单元格（仅影响本页演示）');
       renderQuality();
     };
@@ -1942,7 +2097,7 @@
       const btnRestore = el('button', { class: 'ghost mini', text: '恢复原始数据' });
       btnRestore.onclick = () => {
         S.rowsWork = null;
-        q.preview = null; q.strict = null; q.audit = null;
+        q.preview = null; q.strict = null; q.nested = null; q.audit = null;
         toast('已恢复');
         renderQuality();
       };
@@ -5388,7 +5543,7 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
     }
   }
 
-  const bP1 = el('button', { class: 'ghost mini', text: '导出项目 JSON' });
+  const bP1 = el('button', { class: 'ghost mini', text: '导出项目（仅参数与摘要）' });
     bP1.onclick = () => exportProject(false);
     const bP2 = el('button', { class: 'ghost mini', text: '导出项目（含数据）' });
     bP2.onclick = () => exportProject(true);
@@ -5561,7 +5716,7 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
       name: (S.projectName || '未命名项目'),
       createdAt: new Date().toISOString(),
       app: {
-        name: 'DAC Workbench', version: '6.5.0', algo: 'v6.5',
+        name: 'DAC Workbench', version: '6.6.0', algo: 'v6.5',
         // 源提交与部署提交要能区分：构建时由 build 脚本注入
         buildDigest: (window.__BUILD__ && window.__BUILD__.digest) || null,
         buildTime: (window.__BUILD__ && window.__BUILD__.time) || null
@@ -5570,7 +5725,7 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
         name: S.fileName || (S.sheets ? S.sheets[S.sheetIdx].name : '内置示例'),
         rows: S.rows.length, cols: S.columns.length,
         columns: S.columns.slice(),
-        meta: S.dsMeta || null,
+        meta: metadataOnly(S.dsMeta),
         // 默认不打包原始数据，避免项目文件失控膨胀与隐私外泄
         data: includeData ? (S.rowsRaw || S.rows) : null,
         // 全量指纹（含序列化版本、列名、类型、每行每格）
@@ -5630,6 +5785,7 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
         if (!proj.dataset) return null;
         const want = proj.dataset.hash;
         if (Array.isArray(proj.dataset.data)) {
+          S.sheets = null; S.sheetIdx = 0;
           S.columns = proj.dataset.columns.slice();
           S.rows = proj.dataset.data.map(r => r.slice());
           S.rowsRaw = S.rows.map(r => r.slice());
@@ -5663,7 +5819,8 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
       invalidateResults();
       await verify();
       if (proj.runId) S.runId = proj.runId;
-      S.dsMeta = proj.dataset && proj.dataset.meta || null;
+      S.dsMeta = metadataOnly(proj.dataset && proj.dataset.meta);
+      S.fileName = proj.dataset?.name || '导入项目数据';
       S.importMeta = proj.dataset && proj.dataset.importMeta || null;
       if (proj.roles) S.roles = Object.assign({}, proj.roles);
       if (proj.selections) {
@@ -5702,6 +5859,7 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
       }
       S.projectName = proj.name || S.projectName;
       S.extra = {};
+      refreshOrigin();
       setStep(4);
       setTab('profile');
       if (S.rows.length && S.target) run();
@@ -5749,7 +5907,8 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
       badge.textContent = '不可用（降级主线程）';
       badge.style.color = '#f59e0b';
     } else {
-      try { WK.ensure(); badge.textContent = '已启用'; } catch (e) { badge.textContent = '初始化失败'; }
+      try { badge.textContent = WK.ensure() ? '已启用' : '不可用（主线程回退）'; }
+      catch (e) { badge.textContent = '初始化失败'; }
     }
     const cancel = document.getElementById('sb-cancel');
     if (cancel) cancel.onclick = () => { WK.cancelAll(); setBusy(false, '已取消'); cancel.style.display = 'none'; };

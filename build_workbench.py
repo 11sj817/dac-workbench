@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 import hashlib
 import subprocess
+import sys
+import re
 from datetime import datetime, timezone
 
 ROOT = Path(__file__).resolve().parent
@@ -53,7 +55,25 @@ _build_info = {
     "note": "sourceCommit 是构建时本地 HEAD；部署提交是推送后生成的新提交，两者不同属正常。",
 }
 _build_js = json.dumps(_build_info, ensure_ascii=False).replace("</", "<\\/")
+plain_html = html
 html = html.replace("<script>", "<script>window.__BUILD__ = " + _build_js + ";</script>\n<script>", 1)
+
+if "--check" in sys.argv:
+    files = [OUT, ROOT / "docs/index.html", ROOT / "public/index.html"]
+    for target in files:
+        if not target.exists():
+            raise SystemExit(f"Missing build output: {target.name}")
+        existing = target.read_text(encoding="utf-8")
+        match = re.search(r"window\.__BUILD__ = (\{.*?\});", existing)
+        if not match or json.loads(match.group(1)).get("digest") != _build_digest:
+            raise SystemExit(f"Invalid build digest: {target.relative_to(ROOT)}")
+        clean = re.sub(r"<script>window\.__BUILD__ = \{.*?\};</script>\n", "", existing, count=1)
+        if clean != plain_html:
+            raise SystemExit(f"Stale build output: {target.relative_to(ROOT)}")
+    if len({hashlib.sha256(f.read_bytes()).hexdigest() for f in files}) != 1:
+        raise SystemExit("Build outputs have different bytes")
+    print("PASS three identical outputs match current build inputs | digest", _build_digest)
+    raise SystemExit(0)
 
 OUT.write_text(html, encoding="utf-8", newline="\n")
 

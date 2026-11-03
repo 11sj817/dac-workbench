@@ -2,9 +2,9 @@
 
 在浏览器里完成云校准、样本分型、组合规则、贝叶斯网络和验证的中文数据分析工作台。
 
-**[打开在线工作台](https://11sj817.github.io/dac-workbench/)** · [版本说明](RELEASE_NOTES.md) · [验收记录](VALIDATION_V65.md) · [方法与限制](LIMITATIONS.md)
+**[打开在线工作台](https://11sj817.github.io/dac-workbench/)** · [版本说明](RELEASE_NOTES.md) · [数据来源核验](DATA_SOURCES.md) · [前端设计](FRONTEND_DESIGN.md) · [方法与限制](LIMITATIONS.md)
 
-当前版本 **6.5 · Research Beta**，更新于 **2026-11-03**。无需注册或部署后端，数据在本机浏览器中计算；AI 助手为可选功能，需要单独配置接口。
+当前版本 **6.6 · Research Beta**，更新于 **2026-11-03**。无需注册或部署后端，数据在本机浏览器中计算；AI 助手为可选功能，需要单独配置接口。
 
 ## 用来做什么
 
@@ -42,7 +42,15 @@
 | AI 助手 | 可选接口、流式回复、停止生成、聚合数据发送预览 |
 | 交付 | Markdown、JSON、CSV、XLSX、Word、会话与项目文件 |
 
-## 6.5 更新
+## 6.6 更新
+
+- **来源透明**：UCI 官方文件逐行核对，记录源文件行号及 SHA-256；区分公开样本、合成演示与未核验的上传数据。来源状态和严格 CV 状态分别展示。
+- **前端体验**：长摘要默认折叠，模块图标统一为本地 SVG，窄屏补全步骤导航及触控尺寸，来源详情可展开、下载。
+- **稳定性**：Worker 超时真正终止线程并释放资源；重复运行、延迟上传、切换数据和修改参数不会继续显示旧结果。
+- **导出边界**：仅参数项目不再通过元数据携带内置样本数据行；重新打开项目时不信任项目自称的“官方来源”。
+- **发布检查**：GitHub Actions 在测试、样本指纹、源码与三个构建产物一致性全部通过后发布 Pages。
+
+### 6.5 计算修复
 
 - 界面改为分组模块导航、分步配置和当前分析摘要；保留浅色/深色主题，增加键盘焦点、跳转链接及窄屏布局。
 - 统一目标编码和已选变量，六类目标不被云等级数合并；规则条件独立使用每列标签。
@@ -66,7 +74,9 @@ python -m http.server 8788 --directory public
 ```bash
 npm ci
 npm test
+python data/verify_sources.py --check
 python build_workbench.py
+python build_workbench.py --check
 ```
 
 独立统计参考验证需要 NumPy、SciPy、statsmodels：
@@ -86,11 +96,11 @@ python tests/verify_glm_full.py --output evidence/v65-glm-reference.json
 - `public/index.html`：静态服务器入口。
 - `docs/index.html`：本仓库 GitHub Pages 入口。
 
-构建信息包含源码提交、工作区状态和正文摘要。源码提交与发布提交可以不同，应同时核对正文摘要和文件哈希。流程见 [DEPLOY.md](DEPLOY.md)。
+构建信息包含源码提交、工作区状态和正文摘要。源码提交与发布提交可以不同，应同时核对正文摘要和文件哈希。`--check` 只检查已提交产物，不改写文件。GitHub Actions 验证后将 `docs/` 作为一个制品发布。流程见 [DEPLOY.md](DEPLOY.md)。
 
 ## 验证和边界
 
-6.5 包含 **18 套 JavaScript 测试**和 **171 项 GLM 参考对账**。界面测试执行实际事件处理器，覆盖六类 CSV 上传、取消变量、严格/嵌套验证、Bootstrap、文件生成及项目重开。
+6.6 包含 **19 套 JavaScript 测试**，保留 6.5 的 **171 项 GLM 参考对账**（本轮不修改统计内核）。界面测试执行实际事件处理器，覆盖六类 CSV 上传、取消变量、严格/嵌套验证、Bootstrap、文件生成及项目重开，另有来源与任务取消/超时回归检查。当前验收见 [VALIDATION_V66.md](VALIDATION_V66.md)。
 
 DOM 集成测试不能证明真实浏览器排版、手机触控、Worker 调度和 AI 提供商连接已通过。Gamma inverse 通过指定合成样本对账，也不代表任意数据都收敛。详见[验收记录](VALIDATION_V65.md)。
 
@@ -98,7 +108,7 @@ DOM 集成测试不能证明真实浏览器排版、手机触控、Worker 调度
 
 ## 数据和参考
 
-内置 Iris、Wine Quality、Student Performance、Abalone、Auto MPG、WDBC 来自各自公开数据集；企业创新绩效为合成数据。示例为演示子集，不能替代完整研究设计，使用时需核对原始来源、引用与许可。数据来源标识随示例提供。
+内置 Iris、Wine Quality、Student Performance、Abalone、Auto MPG、WDBC 已与 UCI 官方文件逐行核对；七种公开配置共 2250 行，其中 Student 两种配置共用同一份 400 行数据。企业创新绩效为完全虚构的合成数据。核验一致不等于原研究或当前模型无偏，上传数据真实性也不会被平台自动确认。引用、转换、许可与可复核记录见 [DATA_SOURCES.md](DATA_SOURCES.md)。
 
 方法参考：李海林、林春培《复杂系统影响因素研究的数据驱动分析方法》，清华大学出版社，ISBN 9787302685456。本项目是独立研究实现，不承诺与原站实现或数值等价。
 
