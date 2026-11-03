@@ -1,0 +1,44 @@
+{
+  "checkedAt": "2026-11-03T13:14:11.7742306Z",
+  "repository": "11sj817/dac-workbench",
+  "validatedHead": "316d73eec453e52e623374e8f7fa4cb821cbdc92",
+  "workflowId": 41642257586,
+  "workflowUrl": "https://github.com/11sj817/dac-workbench/actions/runs/41642257586",
+  "workflowConclusion": "success",
+  "jobs": [
+    {
+      "name": "verify",
+      "conclusion": "success"
+    },
+    {
+      "name": "deploy",
+      "conclusion": "success"
+    }
+  ],
+  "pagesBuildType": "workflow",
+  "site": "https://11sj817.github.io/dac-workbench/",
+  "localSha256": "e91c9d198fae8abc7da01e6c64cfe3eaaaf33d5eeb4eef7c8740b4f22ec0ee08",
+  "publicSha256": "e91c9d198fae8abc7da01e6c64cfe3eaaaf33d5eeb4eef7c8740b4f22ec0ee08",
+  "hashMatch": true,
+  "build": {
+    "digest": "6f50dee7d505",
+    "time": "2026-11-03T13:10:54Z",
+    "sourceCommit": "81f5dcdbbab2ee96deb00dbab2995f37fe627597",
+    "sourceDirty": false,
+    "sourceDirtyScope": "build inputs: workbench/, data/samples.js, build_workbench.py",
+    "note": "sourceCommit 是构建时本地 HEAD；部署提交是推送后生成的新提交，两者不同属正常。"
+  },
+  "testSuites": 19,
+  "sourceStabilityChecks": 12,
+  "workspaceGroups": 19,
+  "sourceCatalogCheck": true,
+  "rawSampleValuesUnchanged": true,
+  "deployedUiPassed": true,
+  "realBrowserVisualVerified": false,
+  "realBrowserWorkerVerified": false,
+  "baseline": "670ae319b1580b963b9ab4f76c18cb9d2c8a0e43",
+  "deployedWorkspaceLogSha256": "4c56c78ba9e797daeccc393b387fa780abf06f9c799316c7297808d60046fbbd",
+  "deployedStabilityLogSha256": "f0313e654d07ed2d78b3a6b5e0e3a5bb7d1c75478bdfaa2a71b1d0cfd0fec1bf",
+  "exportsReopened": 5,
+  "exportEvidenceSha256": "714ac376d65d1dad641990ec84b2ed5e26d8aa171d39cec5d6fab20a4744e089"
+}

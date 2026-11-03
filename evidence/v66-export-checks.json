@@ -1,0 +1,52 @@
+{
+  "files": [
+    {
+      "name": "DAC会话_会话_202611031311.docx",
+      "bytes": 8960,
+      "sha256": "09a09372be015a260ed01562a85681b4af5a450f64cebfbc0c0543f8525d1a7c",
+      "zipCrcValid": true,
+      "xmlPartsValid": 3
+    },
+    {
+      "name": "DAC报告_202611031311.docx",
+      "bytes": 7911,
+      "sha256": "1c75b2e02210c4357faaad82b5cf49177a340e4616152bf4ded1ec49e16af686",
+      "zipCrcValid": true,
+      "xmlPartsValid": 3,
+      "uniqueChapterHeadings": [
+        "一、数据体检",
+        "二、云模型校准",
+        "三、异质性情境",
+        "四、组合效应规则",
+        "五、影响机制网络",
+        "六、贝叶斯网络与敏感度分析",
+        "七、观察",
+        "八、机制与口径",
+        "九、局限",
+        "十、下一步"
+      ]
+    },
+    {
+      "name": "DAC校准数据_202611031311.xlsx",
+      "bytes": 3560,
+      "sha256": "68851f504584345b21a39dbfceab133151ba30473f9f37a53914dea4775062ce",
+      "zipCrcValid": true,
+      "xmlPartsValid": 3
+    },
+    {
+      "name": "DAC项目_未命名项目_202611031310.json",
+      "bytes": 11612,
+      "sha256": "24d65209933c45ae80af77e628fd7c1d3684d09d0fe87520baf1cab3a6115755",
+      "parsed": true,
+      "datasetRows": 0
+    },
+    {
+      "name": "DAC项目_未命名项目_202611031311.json",
+      "bytes": 13404,
+      "sha256": "3270d117e2d3c4e6d0085a9d0ef56e60015510122ca65299ea3a71b06fcdea17",
+      "parsed": true,
+      "datasetRows": 120
+    }
+  ],
+  "allReopened": true
+}
