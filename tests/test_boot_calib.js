@@ -68,8 +68,8 @@ console.log('=== 1. 二分类目标：old 会 lo=hi=0 ===');
     const allStr = rec && rec.rules && rec.rules.every(r => typeof r === 'string');
     ok('规则以签名字符串保存', !!allStr, rec && rec.rules ? typeof rec.rules[0] : 'no rules');
     const outcomes = (rec && rec.rules || []).map(r => String(r).split('=>').pop().trim());
-    ok('结论只出现「低 / 高」（未出现第 3 类空等级）',
-      outcomes.length > 0 && outcomes.every(o => ['低', '高'].indexOf(o) >= 0),
+    ok('结论保留原始 0 / 1 类别（未出现第 3 类空等级）',
+      outcomes.length > 0 && outcomes.every(o => ['0', '1'].indexOf(o) >= 0),
       JSON.stringify(outcomes));
     ok('失败轮次有记录字段', typeof res.failed === 'number', JSON.stringify(Object.keys(res)));
   }

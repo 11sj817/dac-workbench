@@ -25,14 +25,37 @@
   /** 双侧 p 值 */
   const pTwoSided = (z) => Math.max(0, Math.min(1, 2 * (1 - normCdf(Math.abs(z)))));
 
-  /* t 分布双侧 p（用正态近似 + 小样本修正，df>200 等价正态） */
+  // Regularized incomplete beta, using a continued fraction (Student t CDF).
+  function betaFraction(a, b, x) {
+    const tiny = 1e-300;
+    let c = 1, d = 1 - (a + b) * x / (a + 1);
+    if (Math.abs(d) < tiny) d = tiny;
+    d = 1 / d;
+    let h = d;
+    for (let m = 1; m <= 400; m++) {
+      const m2 = 2 * m;
+      let aa = m * (b - m) * x / ((a + m2 - 1) * (a + m2));
+      d = 1 + aa * d; if (Math.abs(d) < tiny) d = tiny;
+      c = 1 + aa / c; if (Math.abs(c) < tiny) c = tiny;
+      d = 1 / d; h *= d * c;
+      aa = -(a + m) * (a + b + m) * x / ((a + m2) * (a + m2 + 1));
+      d = 1 + aa * d; if (Math.abs(d) < tiny) d = tiny;
+      c = 1 + aa / c; if (Math.abs(c) < tiny) c = tiny;
+      d = 1 / d;
+      const delta = d * c; h *= delta;
+      if (Math.abs(delta - 1) < 3e-14) break;
+    }
+    return h;
+  }
+  function betaRegularized(x,a,b) {
+    if (x <= 0) return 0; if (x >= 1) return 1;
+    const bt = Math.exp(logGamma(a+b)-logGamma(a)-logGamma(b)+a*Math.log(x)+b*Math.log1p(-x));
+    return x < (a+1)/(a+b+2) ? bt*betaFraction(a,b,x)/a : 1-bt*betaFraction(b,a,1-x)/b;
+  }
   function pTwoSidedT(t, df) {
-    if (!isFinite(t)) return 0;
-    if (df > 200) return pTwoSided(t);
-    // 简单修正：用 df 调整临界值
-    const a = Math.abs(t);
-    const z = a * (1 - 1 / (4 * df));
-    return Math.min(1, pTwoSided(z) * (1 + 1 / (2 * df)));
+    if (!(df > 0) || Number.isNaN(t)) return NaN;
+    if (!Number.isFinite(t)) return 0;
+    return Math.max(0,Math.min(1,betaRegularized(df/(df+t*t),df/2,0.5)));
   }
 
   /* 线性方程组求解（高斯消元 + 部分主元） */
@@ -161,18 +184,13 @@
     },
     'gamma-inverse': {
       name: 'Gamma (inverse)',
-      // 这个链接函数在数值上出了名地难收敛：dμ/dη = -μ²，μ 小时梯度趋零、
-      // μ 大时梯度爆炸，第一次线性化解就能把 η 推到不可行域。
-      // 实测：只有在 1/μ = Xβ 严格为正且尺度合适时才收敛。
-      // 这不是实现 bug，但用户必须知道，所以单独标出来。
-      caveat: 'Gamma(inverse) 的链接函数数值上极不稳定（dμ/dη = -μ²）。'
-        + '需要 1/μ = Xβ 全部为正且尺度合适，否则第一次迭代就会发散。'
-        + '多数场景应使用 Gamma(log)。',
+      // Inverse link requires a positive linear predictor throughout fitting.
+      caveat: 'Gamma(inverse) 要求所有预测的线性项 η>0；拟合采用可行初值与步长回溯。请检查收敛和残差。',
       linkinv: (eta) => {
         if (!(eta > 1e-8)) return NaN;   // 非正 η 视为无效，交给步长衰减处理
         return 1 / eta;
       },
-      mueta: (mu) => -1 / Math.max(1e-20, mu * mu),
+      mueta: (mu) => -Math.max(1e-20, mu * mu),
       variance: (mu) => Math.max(1e-10, mu * mu),
       devResid: (y, mu) => {
         const m = Math.max(1e-10, mu), yy = Math.max(1e-10, y);
@@ -242,9 +260,17 @@
       }
     }
     // 加权：w 默认全 1
-    const wt = (d.weights && d.weights.length === n)
-      ? d.weights.map(v => (Number.isFinite(v) && v > 0 ? v : 0))
-      : new Array(n).fill(1);
+    if (d.weights && (d.weights.length !== n || d.weights.some(v => !Number.isFinite(v) || v < 0))) {
+      throw new Error('频率权重必须与样本逐行对应且全部为有限非负数');
+    }
+    const wt = d.weights ? d.weights.slice() : new Array(n).fill(1);
+    const nFreq = wt.reduce((a,b) => a+b,0);
+    if (!(nFreq > p)) throw new Error('权重总频数不足，信息矩阵奇异或非有限');
+    if (d.family === 'negbin' && !d.theta) {
+      const m = y.reduce((a,v,i) => a+wt[i]*v,0)/nFreq;
+      const variance = y.reduce((a,v,i) => a+wt[i]*(v-m)**2,0)/Math.max(1,nFreq-1);
+      theta = variance > m ? Math.max(1e-4,m*m/(variance-m)) : 1e6;
+    }
 
     // 二分类取值检查
     if (d.family === 'binomial') {
@@ -262,9 +288,10 @@
     // IRLS
     let beta = new Array(p).fill(0);
     // 用 y 的均值初始化截距
-    const yMean = y.reduce((a, b) => a + b, 0) / n;
+    const yMean = y.reduce((a, b, i) => a + wt[i] * b, 0) / nFreq;
     if (d.family === 'gaussian') beta[0] = yMean;
     else if (d.family === 'binomial') beta[0] = Math.log(Math.max(1e-6, yMean) / Math.max(1e-6, 1 - yMean));
+    else if (d.family === 'gamma-inverse') beta[0] = 1 / Math.max(1e-6, yMean);
     else beta[0] = Math.log(Math.max(1e-6, yMean));
 
     let converged = false, iter = 0, deviance = Infinity, lastDev = Infinity;
@@ -285,7 +312,7 @@
         const dm = fam.mueta(mu[i]);
         const v = fam.variance(mu[i], theta);
         W[i] = Math.max(1e-10, dm * dm / v);
-        z[i] = eta[i] + (y[i] - mu[i]) / Math.max(1e-10, dm);
+        z[i] = eta[i] + (y[i] - mu[i]) / (Math.abs(dm) < 1e-10 ? (dm < 0 ? -1e-10 : 1e-10) : dm);
       }
 
       // (X'WX) β = X'Wz
@@ -322,17 +349,17 @@
           for (let j = 0; j < p; j++) e += X[i][j] * b[j];
           const mm = fam.linkinv(e);
           if (!Number.isFinite(mm)) return Infinity;
-          d += fam.devResid(y[i], mm, theta);
+          d += wt[i] * fam.devResid(y[i], mm, theta);
         }
         return Number.isFinite(d) ? d : Infinity;
       };
 
       let step = 1, accepted = null, devNew = Infinity;
-      const curDev = Number.isFinite(deviance) ? deviance : Infinity;
-      for (let h = 0; h < 12; h++) {
+      const curDev = devOf(beta);
+      for (let h = 0; h < 30; h++) {
         const cand = beta.map((v, j) => v + step * (nb[j] - v));
         const dv = devOf(cand);
-        if (dv <= curDev * (1 + 1e-10) || !Number.isFinite(curDev)) {
+        if (Number.isFinite(dv) && (dv <= curDev * (1 + 1e-12) + 1e-12 || !Number.isFinite(curDev))) {
           accepted = cand; devNew = dv; break;
         }
         step /= 2;
@@ -387,11 +414,11 @@
     if (!cov) throw new Error('信息矩阵奇异，无法估计标准误');
 
     // 离散参数
-    const dfResid = n - p;
+    const dfResid = nFreq - p;
     let pearson = 0;
     for (let i = 0; i < n; i++) {
       const v = fam.variance(mu[i], theta);
-      pearson += (y[i] - mu[i]) ** 2 / Math.max(1e-10, v);
+      pearson += wt[i] * (y[i] - mu[i]) ** 2 / Math.max(1e-10, v);
     }
     const dispersion = d.family === 'gaussian' ? (deviance / Math.max(1, dfResid)) : (pearson / Math.max(1, dfResid));
     // 哪些族的 SE 要再乘一个离散度？
@@ -420,35 +447,35 @@
     });
 
     // 拟合优度
-    const ll = logLik(d.family, y, mu, dispersion, theta);
-    const k = p + ((d.family === 'gaussian' || d.family === 'gamma') ? 1 : 0);
+    const ll = logLik(d.family, y, mu, d.family === 'gaussian' ? deviance / nFreq : dispersion, theta, wt);
+    const k = p; // statsmodels GLM convention: scale is excluded; estimated theta is a plug-in estimate.
     const aic = -2 * ll + 2 * k;
-    const bic = -2 * ll + k * Math.log(n);
+    const bic = -2 * ll + k * Math.log(nFreq);
 
     // 空模型 deviance（用于 R²）
     let nullDev = 0;
     const muNull = d.family === 'gaussian' ? yMean
       : d.family === 'binomial' ? yMean : yMean;
-    for (let i = 0; i < n; i++) nullDev += fam.devResid(y[i], muNull, theta);
+    for (let i = 0; i < n; i++) nullDev += wt[i] * fam.devResid(y[i], muNull, theta);
 
     // 诊断
-    const diag = diagnose({ X, y, mu, beta, design, fam, dispersion, pearson, dfResid, nullDev, n, p, theta });
+    const diag = diagnose({ X, y, mu, beta, design, fam, dispersion, pearson, dfResid, nullDev, n, p, theta, weights: wt, nFreq });
 
     return {
       family: d.family,
       familyName: fam.name,
       theta: (d.family === 'negbin') ? theta : null,
       weighted: wt.some(v => v !== 1),
-      n, p, dfResid,
+      n, nFreq, p, dfResid,
       converged, iterations: iter,
       coef, codings: design.codings, names: design.names,
       deviance, nullDeviance: nullDev,
       pearson, dispersion,
       logLik: ll, aic, bic,
       r2: d.family === 'gaussian' ? 1 - deviance / (nullDev || 1) : null,
-      r2adj: d.family === 'gaussian' ? 1 - (1 - (1 - deviance / (nullDev || 1))) * (n - 1) / Math.max(1, dfResid) : null,
+      r2adj: d.family === 'gaussian' ? 1 - (1 - (1 - deviance / (nullDev || 1))) * (nFreq - 1) / Math.max(1, dfResid) : null,
       rmse: d.family === 'gaussian' ? Math.sqrt(deviance / Math.max(1, dfResid)) : null,
-      mae: d.family === 'gaussian' ? y.reduce((s, v, i) => s + Math.abs(v - mu[i]), 0) / n : null,
+      mae: d.family === 'gaussian' ? y.reduce((s, v, i) => s + wt[i] * Math.abs(v - mu[i]), 0) / nFreq : null,
       mu, fitted: mu,
       diagnostics: diag,
       warnings: diag.warnings
@@ -467,28 +494,29 @@
    * @param {number} dispersion  Gaussian 的 σ²、Gamma 的 φ（=1/shape）
    * @param {number} [theta]     NegBin 的离散参数
    */
-  function logLik(family, y, mu, dispersion, theta) {
+  function logLik(family, y, mu, dispersion, theta, weights) {
+    const w = weights || new Array(y.length).fill(1);
     let ll = 0;
     if (family === 'gaussian') {
       // σ² 用 MLE（除以 n）；statsmodels 的 llf 也是 MLE 口径。
       // 我们的 dispersion 用的是 deviance/dfResid（除以 n-p），
       // 两者差一个 n/(n-p) 因子，AIC/BIC 里已经单列说明。
       const n = y.length;
-      const s2mle = Math.max(1e-12, dispersion * (n - 0) / n);
+      const s2mle = Math.max(1e-12, dispersion);
       for (let i = 0; i < n; i++) {
-        ll += -0.5 * (Math.log(2 * Math.PI * s2mle) + (y[i] - mu[i]) ** 2 / s2mle);
+        ll += w[i] * -0.5 * (Math.log(2 * Math.PI * s2mle) + (y[i] - mu[i]) ** 2 / s2mle);
       }
     } else if (family === 'binomial') {
       for (let i = 0; i < y.length; i++) {
         const m = Math.max(1e-12, Math.min(1 - 1e-12, mu[i]));
-        ll += y[i] * Math.log(m) + (1 - y[i]) * Math.log(1 - m);
+        ll += w[i] * (y[i] * Math.log(m) + (1 - y[i]) * Math.log(1 - m));
       }
     } else if (family === 'poisson') {
       for (let i = 0; i < y.length; i++) {
         const m = Math.max(1e-12, mu[i]);
-        ll += y[i] * Math.log(m) - m - logGamma(y[i] + 1);
+        ll += w[i] * (y[i] * Math.log(m) - m - logGamma(y[i] + 1));
       }
-    } else if (family === 'gamma') {
+    } else if (family === 'gamma' || family === 'gamma-inverse') {
       // Gamma(shape=θ, scale=μ/θ) 的对数似然：
       //   ll = Σ [ θ·log(θ/μ) + (θ-1)·log y - θ·y/μ - logΓ(θ) ]
       // 其中 θ = 1/φ，φ 是 dispersion。这里 φ 用 deviance/dfResid（矩估计）。
@@ -498,7 +526,7 @@
       for (let i = 0; i < y.length; i++) {
         const m = Math.max(1e-12, mu[i]);
         const yi = Math.max(1e-12, y[i]);
-        ll += th * Math.log(th / m) + (th - 1) * Math.log(yi) - th * yi / m - lgTh;
+        ll += w[i] * (th * Math.log(th / m) + (th - 1) * Math.log(yi) - th * yi / m - lgTh);
       }
     } else if (family === 'negbin') {
       // NB(θ) 的对数似然：
@@ -508,9 +536,9 @@
       for (let i = 0; i < y.length; i++) {
         const m = Math.max(1e-12, mu[i]);
         const yi = Math.max(0, y[i]);
-        ll += yi * Math.log(m / (m + t))
+        ll += w[i] * (yi * Math.log(m / (m + t))
           + t * Math.log(t / (m + t))
-          + logGamma(yi + t) - lgt - logGamma(yi + 1);
+          + logGamma(yi + t) - lgt - logGamma(yi + 1));
       }
     } else {
       throw new Error('logLik: 未知分布 ' + family);
@@ -531,12 +559,15 @@
     return 0.5 * Math.log(2 * Math.PI) + (x + 0.5) * Math.log(t) - t + Math.log(a);
   }
 
-  /* t 分布临界值（df, 双侧 1-α）—— 用正态 + 修正 */
   function tCrit(df, level) {
-    if (df > 200) return 1.959963985;
-    const z = 1.959963985;
-    // 经验修正：t ≈ z + z(z²+1)/(4df)
-    return z + z * (z * z + 1) / (4 * df);
+    const alpha = 2*(1-level);
+    let lo=0, hi=2;
+    while(pTwoSidedT(hi,df)>alpha && hi<1e12) hi*=2;
+    for(let i=0;i<90;i++) {
+      const mid=(lo+hi)/2;
+      if(pTwoSidedT(mid,df)>alpha) lo=mid; else hi=mid;
+    }
+    return (lo+hi)/2;
   }
 
   /* ---------------- 诊断 ---------------- */
@@ -589,7 +620,7 @@
       // 若该列是常数（哑变量且只出现一次等），VIF 无意义
       const sd = Math.sqrt(yj.reduce((s, v) => s + (v - yj.reduce((a, b) => a + b, 0) / n) ** 2, 0) / n);
       if (sd < 1e-12) { vif.push({ name: design.names[j], vif: NaN }); continue; }
-      const r2 = rSquared(yj, others);
+      const r2 = rSquared(yj, others, x.weights);
       vif.push({ name: design.names[j], vif: r2 >= 1 - 1e-12 ? Infinity : 1 / (1 - r2) });
     }
     const highVif = vif.filter(v => Number.isFinite(v.vif) && v.vif > 10);
@@ -623,29 +654,32 @@
 
   /* 多列回归的 R²（最小二乘） */
   function rSquared(yv, cols) {
-    const n = yv.length, k = cols.length;
-    if (!k) return 0;
+    const n = yv.length;
+    const weights = arguments[2] || new Array(n).fill(1);
+    if (!cols.length) return 0;
+    cols = [new Array(n).fill(1)].concat(cols);
+    const k = cols.length;
     const A = [], b = [];
     for (let i = 0; i < k; i++) {
       A.push(new Array(k).fill(0)); b.push(0);
     }
     for (let a = 0; a < k; a++) {
-      for (let i = 0; i < n; i++) b[a] += cols[a][i] * yv[i];
+      for (let i = 0; i < n; i++) b[a] += weights[i] * cols[a][i] * yv[i];
       for (let c = 0; c < k; c++) {
         let s = 0;
-        for (let i = 0; i < n; i++) s += cols[a][i] * cols[c][i];
+        for (let i = 0; i < n; i++) s += weights[i] * cols[a][i] * cols[c][i];
         A[a][c] = s;
       }
     }
     const coef = solve(A, b);
     if (!coef) return 1;   // 奇异 → 完全共线
-    const ybar = yv.reduce((a, b2) => a + b2, 0) / n;
+    const ybar = yv.reduce((a, b2, i) => a + weights[i] * b2, 0) / weights.reduce((a,b)=>a+b,0);
     let ssr = 0, sst = 0;
     for (let i = 0; i < n; i++) {
       let pred = 0;
       for (let a = 0; a < k; a++) pred += coef[a] * cols[a][i];
-      ssr += (yv[i] - pred) ** 2;
-      sst += (yv[i] - ybar) ** 2;
+      ssr += weights[i] * (yv[i] - pred) ** 2;
+      sst += weights[i] * (yv[i] - ybar) ** 2;
     }
     return sst < 1e-12 ? 1 : Math.max(0, Math.min(1, 1 - ssr / sst));
   }
@@ -697,5 +731,5 @@
     return { tp, fp, tn, fn, acc, sens, spec, prec, f1, thr };
   }
 
-  global.DACGLM = { fit, compare, roc, confusion, FAMILIES, buildDesign, pTwoSided, logGamma, solve, inverse };
+  global.DACGLM = { fit, compare, roc, confusion, FAMILIES, buildDesign, pTwoSided, pTwoSidedT, tCrit, logGamma, solve, inverse };
 })(typeof window !== 'undefined' ? window : self);

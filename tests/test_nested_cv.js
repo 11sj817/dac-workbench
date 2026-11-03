@@ -1,5 +1,5 @@
 /* 嵌套验证（第 10 点收尾）
- * 核心断言：嵌套 CV 的精度 ≤ 普通 CV 的精度（因为前者不含选参乐观偏差）
+ * 核心断言：外层 OOF 记录可独立复算指标。嵌套精度与普通 CV 没有必然大小关系。
  */
 const fs = require('fs');
 global.window = {};
@@ -58,10 +58,10 @@ console.log(`  普通 CV 精度      ${(r.plainAccuracy * 100).toFixed(1)}%  (Ba
 console.log(`  选参乐观偏差      ${(r.optimism * 100).toFixed(1)} 个百分点`);
 ok('optimism 已计算', typeof r.optimism === 'number', (r.optimism * 100).toFixed(1) + 'pp');
 
-// 核心断言：嵌套 ≤ 普通（允许小噪声）
-ok('嵌套精度不高于普通 CV（+2pp 容差）',
-  r.nestedAccuracy <= r.plainAccuracy + 0.02,
-  `nested=${(r.nestedAccuracy * 100).toFixed(1)}% plain=${(r.plainAccuracy * 100).toFixed(1)}%`);
+const recomputed = C.evalMetrics(r.oof.true, r.oof.pred, 2);
+ok('嵌套总体精度可以从外层 OOF 记录复算',
+  Math.abs(r.nestedAccuracy - recomputed.accuracy) < 1e-12,
+  `recomputed=${(recomputed.accuracy * 100).toFixed(1)}%`);
 
 // 每折都记录了内层选了哪组参数
 console.log('\n  各折选参：');

@@ -23,4 +23,5 @@ _*.py
 
 # 本地浏览器测试环境（Firefox + geckodriver）
 _ff/
+node_modules/
 

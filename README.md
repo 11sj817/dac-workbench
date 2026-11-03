@@ -1,105 +1,117 @@
 # DAC Workbench
 
-> 基于 DAC（数据驱动分析方法）思想的可交互数据分析工作台。
-> 纯前端单文件，零依赖、零后端，所有计算在浏览器本地完成。
+在浏览器里完成云校准、样本分型、组合规则、贝叶斯网络和验证的中文数据分析工作台。
 
-**在线体验：https://11sj817.github.io/dac-workbench/**
+**[打开在线工作台](https://11sj817.github.io/dac-workbench/)** · [版本说明](RELEASE_NOTES.md) · [验收记录](VALIDATION_V65.md) · [方法与限制](LIMITATIONS.md)
 
-仓库：https://github.com/11sj817/dac-workbench
+当前版本 **6.5 · Research Beta**，更新于 **2026-11-03**。无需注册或部署后端，数据在本机浏览器中计算；AI 助手为可选功能，需要单独配置接口。
 
----
+## 用来做什么
 
-## 它做什么
+适合教学、研究探索，以及对一份表格提出这些问题：
 
-按 DAC 方法论的四个环节，把「一堆 Excel」变成「能写进论文的结论」：
+- 样本是否存在不同类型，各类有什么共同特征？
+- 哪些条件组合与目标类别共同出现？
+- 改变参数、抽样和验证切分后，发现是否稳定？
+- 模型在验证样本上的表现与多数类基线相比如何？
 
-| 环节 | 方法 | 对应文献 |
-|---|---|---|
-| 1. 数据校准 | 正态云模型（分位数定标 + 云滴 Monte Carlo 隶属度） | 书 3.4 |
-| 2. 异质性分型 | KMeans + 轮廓系数 + 肘部曲线 + PCA 可视化 + 情境自动命名 | 书 4 章 |
-| 3. 组合效应 | CART 决策树 → IF-THEN 规则 + 支持度/置信度 + 5 折交叉验证 | 书 5 章 |
-| 4. 影响机制 | 相关网络 + **贝叶斯网络（BIC 结构学习 + 敏感度分析）** | 书 6 章 |
+采用 DAC 数据驱动分析的思路。校准、分型、规则和网络提供不同观察角度；正式结论仍需领域判断、对照及外部数据。
 
-参考：李海林、林春培《复杂系统影响因素研究的数据驱动分析方法》，清华大学出版社，ISBN 9787302685456。
+## 五步开始
 
-## V2.0 更新（2026-11-02）
+1. **导入数据**：选择内置示例或拖入 CSV/XLSX，CSV 会先显示导入预览。
+2. **选择变量**：指定目标和条件变量，确认目标类型；在角色设置中标记 ID、时间、分组和权重列。
+3. **校准**：调整分位数、云滴数和等级数。无序/有序类别及二分类目标保留原始标签；连续值与计数目标生成 DAC 等级。
+4. **运行分析**：设置聚类数、树深、网络阈值和随机种子，点击“运行完整分析”。
+5. **验证与导出**：在数据质量页运行严格/嵌套验证，再做 Bootstrap；下载报告或“导出项目（含数据）”以便重开。
 
-从「功能演示」升级为「可验证的分析工具」：
+仅参数项目不含原始数据，重开时需先提供匹配的数据。含数据项目文件包含原始表格，请按原始数据的保密要求保管。
 
-- 交叉验证改为**分层 K 折**，输出混淆矩阵 / 平衡准确率 / Macro-F1 / 每类 P-R-F1
-- **修复 BIC 参数数量计算错误**（原用实际出现配置数，应为理论 `k^|Pa|×(k-1)`）
-- 贝叶斯网络搜索增加 **Reverse** 操作 + 搜索日志
-- 推断增加**联合空间上限**（防卡死）与**不可能证据**显式处理
-- KMeans **空簇救援**
-- **33 项自动化测试，100% 通过**
+## 功能
 
-详见：[ALGORITHM_AUDIT.md](ALGORITHM_AUDIT.md) · [ALGORITHM_CHANGELOG.md](ALGORITHM_CHANGELOG.md) · [TEST_REPORT.md](TEST_REPORT.md) · [REPRODUCIBILITY.md](REPRODUCIBILITY.md) · [V2_FEATURES.md](V2_FEATURES.md)
+| 模块 | 输出 |
+|---|---|
+| 数据准备 | 缺失与异常检查、角色设置、工作表选择、稳定行号 |
+| 云模型校准 | 构造式正态云、分位数定标、等级分布、隶属度 |
+| 异质性分型 | KMeans、轮廓系数、PCA、簇特征与样本下钻 |
+| 组合规则 | CART、支持度/置信度、变量重要性、等级条件和参考范围 |
+| 关系分析 | 相关网络、BN 结构学习、按目标类别查看条件概率 |
+| 验证 | 严格 CV、时间/分组切分、嵌套验证、逐行 OOF 记录 |
+| 稳定性 | 参数扫描、Bootstrap 分型/规则/BN 稳定性 |
+| GLM | Gaussian、Binomial、Poisson、Gamma(log/inverse)、Negative Binomial |
+| AI 助手 | 可选接口、流式回复、停止生成、聚合数据发送预览 |
+| 交付 | Markdown、JSON、CSV、XLSX、Word、会话与项目文件 |
 
-运行测试：
+## 6.5 更新
 
-```bash
-node tests/test_core.js
-```
+- 界面改为分组模块导航、分步配置和当前分析摘要；保留浅色/深色主题，增加键盘焦点、跳转链接及窄屏布局。
+- 统一目标编码和已选变量，六类目标不被云等级数合并；规则条件独立使用每列标签。
+- 时间验证按真实时间构建训练集，处理倒序、乱序、重复与无效时间。
+- 嵌套验证保留分析配置，汇总指标可从逐行 OOF 记录重算。
+- 修复 GLM 频率权重、小样本 Student-t、Gamma inverse 和信息准则口径。
+- 修复项目恢复、种子 0、导出标签和项目版本信息，保留原有 AI 流式能力。
 
----
+## 本地使用与开发
 
-## 功能清单
-
-- 数据：拖拽上传 xlsx / csv；内置 3 份公开数据（红酒质量、学生成绩、企业绩效）
-- 体检：缺失、IQR 异常值、偏度、类型识别，表头可点排序
-- 校准：分位数 / 云滴数 / 等级数可调，实时隶属度曲线
-- 分型：k 可调、轮廓系数、PCA 散点、肘部曲线、情境自动命名
-- 规则：人话规则（`IF 融资约束 = 高 且 专利数量 = 低 → 绩效 = 低`）、变量重要性、单因素对照
-- 网络：相关网络 + 阈值剪枝 + 点击高亮
-- 贝叶斯网络：结构学习、CPT、敏感度表（`固定融资约束=高 → 高绩效概率 18.2%`）
-- 稳健性：7 组参数变体自动对比，判定结论是否稳健
-- AI 助手：可接入 DeepSeek / OpenAI / 通义，**AI 只推荐参数和写文字，数字必须来自本地计算**，并做数字溯源校验
-- 导出：Markdown 报告、JSON 结果、校准后 CSV、参数快照、打印 PDF
-
-## 本地打开
-
-直接双击 `DAC-Workbench.html`（xlsx 解析在 `file://` 下可能被浏览器限制，CSV 不受影响）。
-
-或起一个静态服务：
+运行站点不需要 npm 依赖。双击 `DAC-Workbench.html`，或运行：
 
 ```bash
 python -m http.server 8788 --directory public
-# 打开 http://127.0.0.1:8788
 ```
 
-## 重新构建
+打开 `http://127.0.0.1:8788`。建议通过 HTTP(S) 使用文件导入与 Worker。
+
+开发环境：Node.js ≥22.12、Python 3。Node 依赖只用于界面集成测试：
 
 ```bash
-python data/make_samples.py      # 生成示例数据集（需要 pandas）
-python build_workbench.py        # 合并 workbench/* + data/samples.js → DAC-Workbench.html
+npm ci
+npm test
+python build_workbench.py
 ```
 
-产物：`DAC-Workbench.html`（约 190 KB，自包含）。
+独立统计参考验证需要 NumPy、SciPy、statsmodels：
+
+```bash
+python -m pip install numpy scipy statsmodels
+python tests/verify_glm_full.py --output evidence/v65-glm-reference.json
+```
+
+`DAC_NODE` 可指定 Node 可执行文件。脚本逐项检查系数、SE、p/CI、deviance、Pearson、自由度、似然和 AIC/BIC，失败返回非零退出码，不跳过 Gamma inverse。
+
+## 构建与发布
+
+编辑 `workbench/` 后运行 `python build_workbench.py`。同一构建生成三份内容一致的文件：
+
+- `DAC-Workbench.html`：便携单文件。
+- `public/index.html`：静态服务器入口。
+- `docs/index.html`：本仓库 GitHub Pages 入口。
+
+构建信息包含源码提交、工作区状态和正文摘要。源码提交与发布提交可以不同，应同时核对正文摘要和文件哈希。流程见 [DEPLOY.md](DEPLOY.md)。
+
+## 验证和边界
+
+6.5 包含 **18 套 JavaScript 测试**和 **171 项 GLM 参考对账**。界面测试执行实际事件处理器，覆盖六类 CSV 上传、取消变量、严格/嵌套验证、Bootstrap、文件生成及项目重开。
+
+DOM 集成测试不能证明真实浏览器排版、手机触控、Worker 调度和 AI 提供商连接已通过。Gamma inverse 通过指定合成样本对账，也不代表任意数据都收敛。详见[验收记录](VALIDATION_V65.md)。
+
+目前仍不支持多项/有序 logit、分析权重（aweights）及聚类稳健标准误。网络方向和条件敏感度不构成因果证明。完整边界见 [LIMITATIONS.md](LIMITATIONS.md)。
+
+## 数据和参考
+
+内置 Iris、Wine Quality、Student Performance、Abalone、Auto MPG、WDBC 来自各自公开数据集；企业创新绩效为合成数据。示例为演示子集，不能替代完整研究设计，使用时需核对原始来源、引用与许可。数据来源标识随示例提供。
+
+方法参考：李海林、林春培《复杂系统影响因素研究的数据驱动分析方法》，清华大学出版社，ISBN 9787302685456。本项目是独立研究实现，不承诺与原站实现或数值等价。
 
 ## 目录
 
+```text
+workbench/            页面、交互、算法、预处理、Worker
+data/                 示例数据及生成脚本
+tests/                算法、配置一致性、统计参考及 DOM 测试
+evidence/             验收与统计对账记录
+docs/                 GitHub Pages 产物
+public/               静态部署产物
+build_workbench.py    统一构建入口
 ```
-tests/test_core.js     33 项算法自动化测试
-workbench/core.js      算法内核（CSV/XLSX 解析、云模型、KMeans、CART、PCA、贝叶斯网络）
-workbench/ui.js        交互层（步骤流、11 个结果 Tab、AI 助手）
-workbench/index.html   结构与样式
-data/samples.js        三份示例数据（红酒 / 学生 / 企业）
-data/make_samples.py   示例数据生成脚本
-public/                可直接部署的静态站点
-DAC研究报告.html        DAC 原站的深度逆向研究报告
-```
 
-## 数据来源
-
-- Wine Quality：UCI ML Repository，Cortez et al., 2009（公开数据集）
-- Student Performance：UCI ML Repository，Cortez & Silva, 2008（公开数据集）
-- 企业创新绩效：本项目合成（完全虚构，不含任何真实企业信息）
-
-## 许可
-
-代码 MIT。示例数据遵循各自原始许可（UCI 数据集可自由用于研究与教学）。
-
----
-
-**注意**：网络边与贝叶斯网络的方向代表条件依赖，**不是因果证明**。要论证因果需借助工具变量、DID、断点回归等识别策略。
-
+历史研究资料和版本报告保留在仓库中；当前能力、入口及限制以本 README 和 6.5 文档为准。

@@ -321,7 +321,7 @@ test('审计：正常严格 CV 全部 PASS', () => {
   const audit = C.leakageAudit(cv, rawX, ['a', 'b']);
   const fails = audit.items.filter(i => i.status === 'FAIL');
   assert(fails.length === 0, '不应有 FAIL: ' + fails.map(f => f.name + ' ' + f.evidence).join('; '));
-  eq(audit.verdict, '严格无泄漏');
+  assert(audit.verdict.includes('已检查项通过') && audit.verdict.includes('不涵盖业务来源泄漏'));
 });
 
 test('审计：人为破坏索引重叠应 FAIL', () => {

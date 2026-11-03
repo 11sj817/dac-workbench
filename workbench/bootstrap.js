@@ -449,6 +449,8 @@
 
     const n = data.X.length;
     const names = data.names || data.X[0].map((_, j) => 'x' + j);
+    const factorLevels = names.map((_,j) =>
+      C.detectTargetType(data.X.map(row => row[j])).type === 'binary' ? 2 : o.levels);
     const labels = data.labels || ['低', '中', '高', '很高'];
     const t0 = Date.now();
     const runs = [];
@@ -522,25 +524,20 @@
             if (!(hi > lo)) return { lo: lo, hi: lo + Math.max(1e-9, Math.abs(lo) * 1e-9) };
             return { lo, hi };
           });
-          const Xc = names.map((_, j) => C.calibrateWith(Xf.map(r => r[j]), bounds[j], { levels: o.levels, drops: o.drops, seed: o.seed + b }).codes);
+          const Xc = names.map((_, j) => C.calibrateWith(Xf.map(r => r[j]), bounds[j], { levels: factorLevels[j], drops: o.drops, seed: o.seed + b }).codes);
           const Xcm = Xs.map((_, i) => names.map((_, j) => Xc[j][i]));
           const ysSorted = [...ys].filter(Number.isFinite).sort((a, c) => a - c);
           const yq = (p) => ysSorted[Math.min(ysSorted.length - 1, Math.floor(p * (ysSorted.length - 1)))];
           const yType = o.targetType || 'continuous';
-          let yB = null, yc = null;
-          if (yType === 'binary' || yType === 'categorical') {
-            // 类别目标：不做分位数校准，保持原编码映射到 levels 个等级
-            const uniq = Array.from(new Set(ys.filter(Number.isFinite))).sort((a, c) => a - c);
-            const map = new Map();
-            uniq.forEach((v, i) => map.set(v, Math.min(o.levels - 1, i)));
-            yc = ys.map(v => Number.isFinite(v) ? (map.has(v) ? map.get(v) : 0) : 0);
-          } else {
-            let lo = yq(loP), hi = yq(hiP);
-            if (!(hi > lo)) hi = lo + Math.max(1e-9, Math.abs(lo) * 1e-9);
-            yB = { lo, hi };
-            yc = C.calibrateWith(ys, yB, { levels: o.levels, drops: o.drops, seed: o.seed + b }).codes;
-          }
-          const tree = C.cart(Xcm, yc, names, labels, { maxDepth: o.maxDepth, minLeaf: o.minLeaf });
+          const targetLevels = o.targetLevels || C.encodeTarget(data.y, {targetType:yType}).levelValues;
+          const targetEncoded = C.encodeTarget(ys, Object.assign({},o,{targetType:yType,targetLevels,seed:o.seed+b}));
+          const yc = targetEncoded.codes;
+          const yB = targetEncoded.discrete ? null : {lo:targetEncoded.lo,hi:targetEncoded.hi};
+          const targetLabels = targetEncoded.labels;
+          const tree = C.cart(Xcm, yc, names, targetLabels, {
+            maxDepth: o.maxDepth, minLeaf: o.minLeaf,
+            featureLabels: factorLevels.map(lv => C.LEVEL_LABELS[lv])
+          });
           rec.rules = tree.rules.map(r => Object.assign({ sig: ruleSignature(r) }, r));
           rec.accuracy = tree.accuracy;
 
@@ -550,21 +547,17 @@
               const XoobRaw = oobIdx.map(i => data.X[i]);
               const XoobImp = im ? P.transformImputer(XoobRaw, im, Xs).matrix : XoobRaw;
               const XoobCols = names.map((_, j) =>
-                C.calibrateWith(XoobImp.map(r => r[j]), bounds[j], { levels: o.levels, drops: o.drops, seed: o.seed + b }).codes);
+                C.calibrateWith(XoobImp.map(r => r[j]), bounds[j], { levels: factorLevels[j], drops: o.drops, seed: o.seed + b }).codes);
               const XoobCodes = XoobImp.map((_, i) => names.map((_, j) => XoobCols[j][i]));
               const yOobRaw = oobIdx.map(i => data.y[i]);
               let yOobCodes;
               if (yB === null) {
-                // 类别目标：用训练折建立的映射（与上面 uniq 同源）
-                const uniq = Array.from(new Set(data.y.filter(Number.isFinite))).sort((a, c) => a - c);
-                const map = new Map();
-                uniq.forEach((v, i) => map.set(v, Math.min(o.levels - 1, i)));
-                yOobCodes = yOobRaw.map(v => Number.isFinite(v) ? (map.has(v) ? map.get(v) : 0) : 0);
+                yOobCodes = C.encodeTarget(yOobRaw,{targetType:yType,targetLevels}).codes;
               } else {
                 yOobCodes = C.calibrateWith(yOobRaw, yB, { levels: o.levels, drops: o.drops, seed: o.seed + b }).codes;
               }
               const pred = XoobCodes.map(r => C.predictTree(tree.root, r));
-              rec.oob = C.evalMetrics(yOobCodes, pred, o.levels);
+              rec.oob = C.evalMetrics(yOobCodes, pred, targetEncoded.levels);
             } catch (e2) {
               rec.oobError = (e2 && e2.message) || String(e2);
             }
@@ -587,23 +580,17 @@
             if (!(hi > lo)) return { lo: lo, hi: lo + Math.max(1e-9, Math.abs(lo) * 1e-9) };
             return { lo, hi };
           });
-          const Xc = names.map((_, j) => C.calibrateWith(Xs.map(r => r[j]), bounds[j], { levels: o.levels, drops: o.drops, seed: o.seed + b }).codes);
+          const Xc = names.map((_, j) => C.calibrateWith(Xs.map(r => r[j]), bounds[j], { levels: factorLevels[j], drops: o.drops, seed: o.seed + b }).codes);
           const yS = [...ys].filter(Number.isFinite).sort((a, c) => a - c);
           const yq = (p) => yS[Math.min(yS.length - 1, Math.floor(p * (yS.length - 1)))];
           const yType2 = o.targetType || 'continuous';
-          let yc;
-          if (yType2 === 'binary' || yType2 === 'categorical') {
-            const uniq2 = Array.from(new Set(ys.filter(Number.isFinite))).sort((a, c) => a - c);
-            const map2 = new Map();
-            uniq2.forEach((v, i) => map2.set(v, Math.min(o.levels - 1, i)));
-            yc = ys.map(v => Number.isFinite(v) ? (map2.has(v) ? map2.get(v) : 0) : 0);
-          } else {
-            let lo2 = yq(loP2), hi2 = yq(hiP2);
-            if (!(hi2 > lo2)) hi2 = lo2 + Math.max(1e-9, Math.abs(lo2) * 1e-9);
-            yc = C.calibrateWith(ys, { lo: lo2, hi: hi2 }, { levels: o.levels, drops: o.drops, seed: o.seed + b }).codes;
-          }odes;
+          const targetLevels = o.targetLevels || C.encodeTarget(data.y,{targetType:yType2}).levelValues;
+          const encoded = C.encodeTarget(ys,Object.assign({},o,{targetType:yType2,targetLevels,seed:o.seed+b}));
+          const yc = encoded.codes;
           const discrete = Xs.map((_, i) => names.map((_, j) => Xc[j][i]).concat([yc[i]]));
-          const bn = C.bnLearn(discrete, allNames, o.levels, { maxParents: 2, seed: o.seed + b });
+          const bn = C.bnLearn(discrete, allNames, o.levels, {
+            maxParents:2, seed:o.seed+b, cardinalities:factorLevels.concat([encoded.levels])
+          });
           rec.graph = { edges: bn.edges, nodeNames: allNames };
           rec.score = bn.score;
           rec.ok = true;
@@ -623,6 +610,7 @@
     const summary = summarize(runs, { task: o.task, B: o.B, n, names, labels, k: o.k, threshold: o.bnThreshold });
     return {
       task: o.task,
+      targetContract: {type:o.targetType||'continuous', levels:o.targetLevels||C.encodeTarget(data.y,{targetType:o.targetType||'continuous'}).levelValues},
       B: o.B, seed: o.seed, method: o.method, fraction: o.fraction, replacement: o.replacement,
       blockType: o.blockType || null, blockLength: o.blockLength || null,
       memory: memoryEstimate(n, o.B),

@@ -1,69 +1,51 @@
-# 部署到 GitHub Pages（永久链接，不用开机）
+# 构建与 GitHub Pages 发布
 
-目标：得到 `https://<你的用户名>.github.io/dac-workbench/`，永久在线、带 HTTPS、不需要本机开机。
+本仓库 Pages 使用 **main 分支 /docs 目录**，公开入口：
 
----
+https://11sj817.github.io/dac-workbench/
 
-## 方式 A：网页上传（最简单，不用装任何工具）
-
-1. 打开 https://github.com/new
-2. Repository name 填 `dac-workbench`，选 **Public**，点 Create repository
-3. 在空仓库页面点 **uploading an existing file**
-4. 把 `public/` 文件夹里的 **3 个文件** 拖进去：
-   - `index.html`
-   - `report.html`
-   - `home.html`
-5. 点 **Commit changes**
-6. 进 **Settings → Pages**
-   - Source 选 **Deploy from a branch**
-   - Branch 选 **main**，目录选 **/ (root)**
-   - 点 Save
-7. 等 1~2 分钟，刷新页面，顶部会出现：
-   `Your site is live at https://<用户名>.github.io/dac-workbench/`
-
-> 注意：仓库根目录必须有 `index.html`，否则 Pages 会 404。
-
----
-
-## 方式 B：命令行推送（改了代码想自动更新就用这个）
+## 发布
 
 ```bash
-cd <项目根目录>
-
-# 第一次：关联远程仓库（把 URL 换成你自己的）
-git remote add origin https://github.com/<用户名>/dac-workbench.git
-
-# 每次更新后
-git add public/index.html
-git commit -m "update workbench"
-git push
+npm ci
+npm test
+python tests/verify_glm_full.py
+# 检查并提交本次源码、文档和验收证据
+git commit -m "feat: update analysis workspace and validation"
+python build_workbench.py
+git add DAC-Workbench.html docs/index.html public/index.html
+git commit -m "build: publish verified workbench"
+git push origin main
 ```
 
-推送后 GitHub Pages 会自动重新部署，约 1 分钟生效。
+使用本机凭据管理器，不把 token 放入脚本、远端 URL 或日志，不使用 `--force`。推送前检查远端有没有新提交。
 
----
+GitHub Settings → Pages 设置为 Deploy from a branch、`main /docs`；已启用时无需每次重设。
 
-## 方式 C：Netlify 拖拽（比 Pages 更快，1 分钟出链接）
+## 核验
 
-1. 打开 https://app.netlify.com/drop
-2. 把整个 `public/` 文件夹拖进页面
-3. 立刻得到一个 `https://xxx.netlify.app` 的地址（注册后可改域名、长期保留）
+1. 检查 Pages 构建成功、公开 URL 返回成功。
+2. 下载公开 HTML，与 `docs/index.html` 比较完整 SHA-256。
+3. 核对 `window.__BUILD__` 的摘要与源码提交。源码提交不同于包含产物的部署提交是正常的。
+4. 对下载产物执行界面集成测试：
 
----
+```powershell
+$env:DAC_SITE_HTML = 'C:\Temp\deployed.html'
+node tests/test_workspace.js
+Remove-Item Env:DAC_SITE_HTML
+```
 
-## 常见问题
+DOM 测试执行下载产物的实际处理器，不替代真实浏览器视觉、手机或 Worker 验收。
 
-**Q：Pages 打开是 404？**
-检查仓库根目录有没有 `index.html`，并确认 Settings → Pages 的分支/目录选对了。
+## 本地与其他托管
 
-**Q：页面白屏？**
-按 F12 看 Console。常见原因是把 `index.html` 改坏了（它已经内联了全部 JS，不能拆开）。
+`python -m http.server 8788 --directory public`，或把 `public/` 交给静态托管。便携使用 `DAC-Workbench.html`。修改 `workbench/` 源码，生成文件会在下次构建被覆盖。
 
-**Q：上传 xlsx 报错？**
-`file://` 协议下某些浏览器会限制解析。用 `http://` 打开（Pages 就是 http(s)），或让用户另存为 CSV。
+## 回退
 
-**Q：想换成自己的域名？**
-Settings → Pages → Custom domain，填域名后在域名商处加 CNAME 记录指向 `<用户名>.github.io`。
+```bash
+git revert <发布提交> <源码提交>
+git push origin main
+```
 
-**Q：我还想保留原来的临时隧道？**
-可以。双击 `一键启动工作台.bat` 即可，两边互不影响。
+重新检查 Pages 和公开文件哈希。历史报告中的旧入口、文件大小和测试数量不能作为当前状态证据。

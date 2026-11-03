@@ -1,0 +1,14 @@
+{
+  "name": "dac-workbench",
+  "version": "6.5.0",
+  "private": true,
+  "description": "DAC browser analysis workbench",
+  "scripts": {
+    "test": "node tests/run-tests.js",
+    "test:ui": "node tests/test_workspace.js",
+    "test:stats": "python tests/verify_glm_full.py",
+    "build": "python build_workbench.py"
+  },
+  "engines": { "node": ">=22.12" },
+  "devDependencies": { "jsdom": "30.1.3" }
+}

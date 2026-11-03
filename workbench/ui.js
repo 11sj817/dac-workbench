@@ -157,18 +157,22 @@
       const v = +li.dataset.step;
       li.classList.toggle('on', v === n);
       li.classList.toggle('done', v < n);
+      li.setAttribute('aria-current', v === n ? 'step' : 'false');
     });
     ['1', '2', '3', '4'].forEach(i => {
       const p = $('#panel-' + i);
       if (p) p.style.display = (String(n) === i) ? '' : 'none';
     });
-    if (n === 5) { document.querySelectorAll('#panel-2,#panel-3,#panel-4').forEach(p => p.style.display = 'none'); }
+    if (n === 5) {
+      document.querySelectorAll('#panel-2,#panel-3').forEach(p => p.style.display = 'none');
+      $('#panel-4').style.display = '';
+    }
+    updateWorkspaceContext();
   }
   function gotoStep(v) {
     if (v >= 2 && !S.columns.length) { toast('请先导入数据'); scrollTop(); return; }
-    if (v >= 4 && !S.res) {
-      // 不给结果就跳第 4/5 步 → 停在参数页，明确告诉用户
-      setStep(3); setTab('guide');
+    if (v === 5 && !S.res) {
+      setStep(4); setTab('guide');
       toast('还没有分析结果：先在第 4 步点「运行完整分析」');
       scrollTop(); return;
     }
@@ -182,7 +186,11 @@
   document.querySelectorAll('#steps li').forEach(li => {
     li.onclick = () => gotoStep(+li.dataset.step);
     li.style.cursor = 'pointer';
+    li.onkeydown = e => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); gotoStep(+li.dataset.step); }
+    };
   });
+  $('#btnGuide').onclick = () => { setTab('guide'); scrollTop(); };
   // 键盘快捷键：1~5 切换步骤，Esc 回第 1 步
   document.addEventListener('keydown', e => {
     if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
@@ -192,6 +200,9 @@
 
   /* ---------------- 数据载入 ---------------- */
   $('#drop').onclick = () => $('#file').click();
+  $('#drop').onkeydown = e => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('#file').click(); }
+  };
   $('#file').onchange = e => { if (e.target.files[0]) loadFile(e.target.files[0]); };
   ['dragover', 'dragenter'].forEach(ev => $('#drop').addEventListener(ev, e => {
     e.preventDefault(); $('#drop').classList.add('hot');
@@ -337,6 +348,9 @@
     resetAnalysis();
     // 数据集语义元数据（目标推荐、类型、排除列、说明）——决定"研究问题"是什么
     S.dsMeta = meta || null;
+    S.targetType = 'auto';
+    $('#targetType').value = 'auto';
+    S.importMeta = null;
     S.columns = parsed.columns;
     S.rows = parsed.rows;
     S.rowsRaw = parsed.rows.map(r => r.slice());
@@ -393,13 +407,22 @@
     t.value = (roleTarget && S.numeric.includes(roleTarget))
       ? roleTarget
       : S.numeric[S.numeric.length - 1];
-    t.onchange = renderFactors;
+    t.onchange = () => {
+      S.target = t.value;
+      S.factors = [];
+      S.targetType = 'auto';
+      $('#targetType').value = 'auto';
+      invalidateResults();
+      renderFactors();
+      updateWorkspaceContext();
+      setTab('profile');
+    };
 
     S.target = t.value;
     renderFactors();
     // S.roles 才是持久状态；复选框只是它的视图。
     // 如果 UI 被重建导致 pickedFactors() 读不到，#btnRun 会拿空因子直接 return。
-    S.factors = S.columns.filter(c => c !== S.target && (S.roles[c] === 'num' || S.roles[c] === 'cat'));
+    S.factors = pickedFactors();
     setStep(2);
     S.tab = 'profile';
     setTab('profile');
@@ -412,16 +435,98 @@
     const box = $('#factors'); box.innerHTML = '';
     const tgt = $('#target').value;
     const usable = new Set(['num', 'cat']);
+    const previous = new Set(S.factors || []);
     S.numeric.filter(c => c !== tgt && (S.roles[c] === undefined || usable.has(S.roles[c]))).forEach(c => {
       const cb = el('input', { type: 'checkbox', value: c });
-      cb.checked = true;
+      cb.checked = !previous.size || previous.has(c);
       cb.style.marginRight = '7px';
+      cb.onchange = () => {
+        S.factors = pickedFactors();
+        invalidateResults();
+        updateWorkspaceContext();
+        setTab(S.tab);
+      };
       box.appendChild(el('label', { class: 'row', style: 'margin:5px 0;cursor:pointer' },
         [cb, el('span', { text: c })]));
     });
-    $('#facCount').textContent = '(' + (S.numeric.length - 1) + ' 个)';
+    S.factors = pickedFactors();
+    $('#facCount').textContent = '(' + S.factors.length + ' 个)';
+    updateWorkspaceContext();
   }
   const pickedFactors = () => [...document.querySelectorAll('#factors input:checked')].map(i => i.value);
+
+  function currentTargetInfo() {
+    const idx = S.columns.indexOf(S.target);
+    const detected = idx >= 0 ? C.detectTargetType(S.rows.map(r => r[idx])) : { type: 'continuous', levels: [] };
+    const declared = S.targetType && S.targetType !== 'auto' ? S.targetType
+      : S.dsMeta && S.dsMeta.recommendedTarget === S.target ? S.dsMeta.targetType : null;
+    return Object.assign({}, detected, { type: declared || detected.type, declared: !!declared });
+  }
+
+  function updateWorkspaceContext() {
+    const ready = S.rows.length > 0;
+    const n = (S.factors || []).length;
+    const target = document.getElementById('contextTarget');
+    if (target) target.textContent = ready ? S.target || '选择目标变量' : '尚未选择数据';
+    const detail = document.getElementById('contextDetails');
+    if (detail) detail.textContent = ready ? `${S.rows.length} 行 · ${n} 个条件变量` : '选择示例，或导入自己的表格。';
+    const subtitle = document.getElementById('workspaceSubtitle');
+    if (subtitle) subtitle.textContent = ready
+      ? `${S.rows.length} 行数据 · 目标：${S.target} · ${n} 个条件变量`
+      : '导入表格，探索分型、组合规则与变量关系。';
+    const state = document.getElementById('analysisState');
+    if (state) state.textContent = S.res ? '分析已完成' : ready ? '配置分析' : '准备数据';
+    const hint = document.getElementById('targetTypeHint');
+    if (hint && ready) {
+      const info = currentTargetInfo();
+      const types = { continuous: '连续数值', count: '计数', binary: '二分类', categorical: '无序类别', nominal: '无序类别', ordinal: '有序类别' };
+      hint.textContent = `${info.declared ? '已指定' : '识别为'}${types[info.type] || info.type}。` +
+        (['binary','categorical','nominal','ordinal'].includes(info.type) ? '保留原始类别，不受云等级数影响。' : '目标将按云校准生成等级。');
+    }
+    const count = document.getElementById('facCount');
+    if (count) count.textContent = `(${n} 个)`;
+  }
+
+  $('#targetType').onchange = () => {
+    S.targetType = $('#targetType').value;
+    invalidateResults(); updateWorkspaceContext(); setTab('guide');
+  };
+
+  function invalidateResults() {
+    WK.cancelAll();
+    S.res = null; S.extra = {}; S.rowsWork = null;
+    $('#status').textContent = '配置已更改 · 等待运行';
+  }
+
+  // 所有验证共用用户选中的列；角色列只负责切分或抽样。
+  function analysisInput(rows) {
+    const source = rows || S.rows;
+    const target = S.target;
+    const idxT = S.columns.indexOf(target);
+    const factors = (S.factors || []).filter(n => n !== target && S.numeric.includes(n) &&
+      !['id','exclude','group','time','weight','strata','target'].includes(S.roles[n]));
+    if (idxT < 0 || !factors.length) throw new Error('请先选择目标和至少一个条件变量');
+    const idxF = factors.map(n => S.columns.indexOf(n));
+    const groupCol = S.columns.find(n => S.roles[n] === 'group');
+    const timeCol = S.columns.find(n => S.roles[n] === 'time');
+    const timeValues = timeCol ? source.map(r => {
+      const v = r[S.columns.indexOf(timeCol)];
+      if (v === null || v === undefined || v === '') return null;
+      const t = typeof v === 'number' ? v : Date.parse(v);
+      return Number.isFinite(t) ? t : null;
+    }) : null;
+    if (timeValues && timeValues.some(t => t === null)) throw new Error('时间列存在空值或无法识别的日期，请先修正时间数据');
+    const timeOrder = timeValues ? source.map((_, i) => i).sort((a,b) => timeValues[a]-timeValues[b]) : null;
+    const targetInfo = currentTargetInfo();
+    return {
+      rawX: source.map(r => idxF.map(j => r[j])), yRaw: source.map(r => r[idxT]),
+      names: factors, target, targetType: targetInfo.type,
+      targetLevels: Array.isArray(targetInfo.levels) ? targetInfo.levels : targetInfo.levelValues,
+      groups: groupCol ? source.map(r => r[S.columns.indexOf(groupCol)]) : null,
+      timeOrder, timeValues,
+      rowIds: source.map((_,i) => S.importMeta && S.importMeta.rowIds && S.importMeta.rowIds[i] !== undefined ? S.importMeta.rowIds[i] : i+1)
+    };
+  }
 
 
   /* ---------------- 变量角色 / 工作表 ---------------- */
@@ -495,12 +600,15 @@
     const applyRoleTable = () => {
       // 同步到分析用的 target / factors
       const tgt = S.columns.find(c2 => S.roles[c2] === 'target');
-      if (tgt) $('#target').value = tgt;
+      if (tgt) { $('#target').value = tgt; S.target = tgt; }
       renderFactors();
       const usable = new Set(['num', 'cat']);
       document.querySelectorAll('#factors input').forEach(inp => {
         inp.checked = usable.has(S.roles[inp.value]);
       });
+      S.factors = pickedFactors();
+      invalidateResults();
+      updateWorkspaceContext();
     };
     function renderRoleTable() { /* 简化：不做整表重绘，直接同步 */ applyRoleTable(); }
 
@@ -559,9 +667,10 @@
 
   $('#next2').onclick = () => {
     if (pickedFactors().length === 0) return toast('至少选一个条件变量');
-    setStep(3); setTab('calib'); run();
+    S.factors = pickedFactors();
+    setStep(3); setTab('guide');
   };
-  $('#next3').onclick = () => { setStep(4); setTab('scene'); run(); };
+  $('#next3').onclick = () => { setStep(4); setTab('guide'); };
   $('#btnRun').onclick = () => run();
 
   function readParams() {
@@ -569,7 +678,7 @@
       lowPct: +$('#low').value, highPct: +$('#high').value,
       drops: +$('#drops').value, levels: +$('#levels').value,
       k: +$('#k').value, treeDepth: +$('#depth').value,
-      netThreshold: +$('#net').value / 100, seed: +$('#seed').value || 42
+      netThreshold: +$('#net').value / 100, seed: $('#seed').value === '' ? 42 : +$('#seed').value
     };
   }
 
@@ -654,7 +763,8 @@
       cal[f].levelsUsed = lv;
       cal[f].varType = t.type;
     });
-    const calY = C.calibrate(yv, params);
+    const targetInfo = currentTargetInfo();
+    const calY = C.encodeTarget(yv, Object.assign({}, params, { targetType: targetInfo.type }));
     const levels = params.levels;
     // 无序类别不能套「低/中/高」——那等于给类别排了序
     const _tDet = C.detectTargetType(yv);
@@ -663,9 +773,7 @@
       ? _declared : _tDet.type;
     const _isNom = ['binary','categorical','nominal'].indexOf(_tType) >= 0;
     // 无序类别用「类别 1/2/3」；有序/连续仍用「低/中/高」
-    const labels = _isNom
-      ? Array.from({ length: levels }, (_, i) => '类别' + (i + 1))
-      : C.LEVEL_LABELS[levels];
+    const labels = calY.labels;
 
     // 聚类
     const km = C.kmeans(X, params.k, { seed: params.seed });
@@ -684,7 +792,10 @@
     // 决策树（用校准后的等级）
     const Xc = keep.map((_, i) => factors.map(f => cal[f].codes[i]));
     const yc = calY.codes.slice();
-    const tree = C.cart(Xc, yc, factors, labels, { maxDepth: params.treeDepth, minLeaf: Math.max(10, Math.round(keep.length / 40)) });
+    const tree = C.cart(Xc, yc, factors, labels, {
+      maxDepth: params.treeDepth, minLeaf: Math.max(10, Math.round(keep.length / 40)),
+      featureLabels: factors.map(f => cal[f].labels)
+    });
 
     // 网络
     const net = C.network(S.columns, S.rows, factors.concat([target]), params.netThreshold);
@@ -704,22 +815,25 @@
 
     // 交叉验证
     const minLeaf = Math.max(10, Math.round(keep.length / 40));
-    const cv = C.crossValidate(Xc, yc, factors, labels, { maxDepth: params.treeDepth, minLeaf }, 5);
+    const cv = C.crossValidate(Xc, yc, factors, labels, {
+      maxDepth: params.treeDepth, minLeaf, featureLabels: factors.map(f => cal[f].labels)
+    }, 5);
 
     // 情境自动命名
     const baseMean = {};
     factors.forEach((f, k) => { baseMean[f] = C.mean(X.map(r => r[k])); });
     baseMean[target] = C.mean(yv);
-    const scenNames = C.nameScenarios(stats, factors, target, baseMean, (S.res && S.res.meta && S.res.meta.targetType && S.res.meta.targetType.type) || 'continuous');
+    const scenNames = C.nameScenarios(stats, factors, target, baseMean, targetInfo.type);
 
     // 贝叶斯网络（离散化后的数据）
     const discrete = keep.map((_, i) => factors.map(f => cal[f].codes[i]).concat([calY.codes[i]]));
     const allNames = factors.concat([target]);
     let bn = null, sens = null, bnError = null;
-    const stateSpace = C.bnStateSpace(allNames.length, levels);
+    const cardinalities = factors.map(f => cal[f].levels).concat([calY.levels]);
+    const stateSpace = C.bnStateSpace(allNames.length, cardinalities);
     try {
       // 结构学习不受联合空间限制，先学结构
-      bn = C.bnLearn(discrete, allNames, levels);
+      bn = C.bnLearn(discrete, allNames, levels, { cardinalities });
       // 精确推断才受限：超限就跳过敏感性，但保留网络结构
       if (stateSpace.ok) {
         sens = factors.map(f => ({ f, rows: C.bnSensitivity(bn, f, levels) }));
@@ -749,7 +863,7 @@
             : (typeof detected.levels === 'number' ? detected.levels : 0);
           const out = Object.assign({}, detected, { levels: nLevels, levelValues: detected.levels });
           // 数据集元数据里声明的类型优先：有序等级不能被自动检测降级成无序
-          const declared = S.dsMeta && S.dsMeta.targetType;
+          const declared = targetInfo.type;
           const ALLOW = ['nominal', 'ordinal', 'binary', 'continuous', 'count', 'categorical'];
           if (declared && ALLOW.indexOf(declared) >= 0) {
             out.type = declared;
@@ -816,8 +930,9 @@
             if (!th || !th.length) return null;
             const L = th.length + 1;
             if (L === 2) return c.hi === 0 ? `≤ ${put(th[0])}` : `> ${put(th[0])}`;
-            if (c.lo === 0) return `≤ ${put(th[0])}`;
-            if (c.hi === L - 1) return `> ${put(th[L - 2])}`;
+            if (c.lo === 0 && c.hi === L - 1) return '全部等级';
+            if (c.lo === 0) return `≤ ${put(th[c.hi])}`;
+            if (c.hi === L - 1) return `> ${put(th[c.lo - 1])}`;
             return `${put(th[c.lo - 1])} ~ ${put(th[c.hi])}`;
           })
           : null;
@@ -1201,6 +1316,7 @@
     const payload = {
       v: 'dac-config/1',
       target: S.target,
+      targetType: S.targetType || 'auto',
       factors: (S.factors || []).slice().sort(),
       roles: S.roles || {},
       params: S.params || {}
@@ -1527,7 +1643,29 @@
   };
   function setTab(t) {
     S.tab = t;
-    [...document.querySelectorAll('#tabs button')].forEach(b => b.classList.toggle('on', b.dataset.tab === t));
+    [...document.querySelectorAll('#tabs button')].forEach(b => {
+      b.classList.toggle('on', b.dataset.tab === t);
+      b.setAttribute('aria-current', b.dataset.tab === t ? 'page' : 'false');
+    });
+    const descriptions = {
+      guide:['开始一次分析','从研究问题出发，逐步建立分析依据。'],
+      profile:['数据体检','了解样本规模、变量分布和潜在问题。'],
+      quality:['数据质量与验证','先处理缺失，再检查泛化表现和切分记录。'],
+      corr:['相关性','观察数值变量之间的线性关联。'],
+      calib:['云模型校准','连续变量生成等级，类别目标保留原始标签。'],
+      scene:['异质性分型','比较不同样本群体及其特征。'],
+      rules:['组合规则','把条件组合还原成可阅读、可下钻的规则。'],
+      net:['机制网络','查看变量关联结构；网络不构成因果证明。'],
+      bn:['贝叶斯网络','学习条件依赖，检验证据下的概率分布。'],
+      robust:['稳健性检验','调整参数，观察结论对分析选择的敏感程度。'],
+      boot:['Bootstrap 稳定性','重复抽样，检查分型、规则或网络结构是否稳定。'],
+      glm:['统计建模','为目标类型选择合适的分布与解释方式。'],
+      ai:['AI 分析助手','根据本地结果组织解释，也可以先咨询方法。'],
+      report:['导出与复现','保存结果、报告和项目，便于复核与继续分析。']
+    };
+    const title = descriptions[t] || descriptions.guide;
+    $('#paneTitle').textContent = title[0]; $('#paneDescription').textContent = title[1];
+    updateWorkspaceContext();
     renderTab();
   }
   function renderTab() {
@@ -1580,21 +1718,28 @@
   /* ---------------- 渲染：指引 ---------------- */
   function renderGuide() {
     $('#pane').innerHTML = `
-      <h3 style="margin-top:0">按 DAC 的四步走（和原站流程一致，但每一步都能看到为什么）</h3>
-      <div class="grid2">
-        <div class="rule"><b>① 导入</b><br>拖入 xlsx 或 csv。前 n-1 列是条件变量，最后一列是决策变量。<br>
-          <span class="muted">对应书 3.1–3.2：数据来源与采集</span></div>
-        <div class="rule"><b>② 选变量</b><br>指定 y 与若干 x。系统会自动做数据体检（缺失/异常/偏度）。<br>
-          <span class="muted">对应书 3.3：描述性统计与相关性分析</span></div>
-        <div class="rule"><b>③ 云模型校准</b><br>用 25/75 分位定标，把连续变量映射成「低/中/高」等级。<br>
-          <span class="muted">对应书 3.4：正态云模型与数据校准过程</span></div>
-        <div class="rule"><b>④ 分析</b><br>KMeans 分型 → CART 出规则 → 相关网络看结构。<br>
-          <span class="muted">对应书 4/5/6 章；注意书第 6 章用贝叶斯网络，这里只到相关网络</span></div>
+      <div class="welcome-lead"><span class="eyebrow">EXPLORE · EXPLAIN · VERIFY</span>
+        <h3>${S.rows.length ? '先明确问题，再运行分析。' : '你的数据里，有哪些值得解释的组合？'}</h3>
+        <p>DAC 把校准、分型、组合规则和条件依赖连接起来。先找出数据中的结构，再通过交叉验证与重采样检查发现是否可靠。</p>
       </div>
-      <div class="hint" style="margin-top:14px">
-        <b>没有数据？</b>点左侧「载入示例」，用 1000 条虚构企业数据跑一遍，30 秒看完整个流程。<br>
-        <b>想验证结论稳不稳？</b>改分位数（25/75 → 30/70）或 k 值，看规则和分型怎么变——这就是稳健性检验。
-      </div>`;
+      <div class="welcome-actions">
+        <button class="primary" id="guidePrimary">${S.rows.length ? (S.step === 3 ? '下一步：分析设置 →' : S.step === 4 ? '运行完整分析 →' : '继续配置分析 →') : '体验鸢尾花示例 →'}</button>
+        <button class="ghost" id="guideImport">${S.rows.length ? '查看数据质量' : '导入我的表格'}</button>
+      </div>
+      <div class="method-grid">
+        <article class="method-card"><span class="method-symbol">μ</span><h4>校准 · 统一刻度</h4><p>把连续数值转换成等级；分类目标保留每一个原始类别。</p><small>先确认目标与变量语义</small></article>
+        <article class="method-card"><span class="method-symbol">◉</span><h4>分型 · 发现异质性</h4><p>用 KMeans 与 PCA 观察群体差异，查看每组的原始样本。</p><small>同时检查轮廓系数与样本量</small></article>
+        <article class="method-card"><span class="method-symbol">⋈</span><h4>规则 · 解释组合</h4><p>用 CART 找出条件组合，阅读规则、支持样本和原始量纲。</p><small>训练集占比不等于泛化表现</small></article>
+        <article class="method-card"><span class="method-symbol">◇</span><h4>网络 · 探索依赖</h4><p>观察关联网络与贝叶斯网络，比较证据下的目标概率。</p><small>条件依赖不构成因果识别</small></article>
+      </div>
+      <div class="welcome-foot"><span>CSV / XLSX 导入</span><span>计算在浏览器本地执行</span><span>项目可保存与重开</span></div>`;
+    $('#guidePrimary').onclick = () => {
+      if (!S.rows.length) { loadSample(DS.iris ? 'iris' : Object.keys(DS)[0]); return; }
+      if (S.step === 4) { run(); return; }
+      setStep(S.step === 3 ? 4 : 2);
+      scrollTop();
+    };
+    $('#guideImport').onclick = () => S.rows.length ? setTab('quality') : $('#file').click();
   }
 
   /* ---------------- 渲染：体检 ---------------- */
@@ -1734,7 +1879,7 @@
     const box2 = el('div', { class: 'testout ' + (nr.nestedAccuracy !== null ? 'ok' : 'bad') });
     box2.innerHTML =
       `<b>嵌套验证（外层 ${nr.k} 折 × 网格 ${nr.grid} 点）</b><br>`
-      + `嵌套精度（无偏泛化估计） <b>${fmt(nr.nestedAccuracy)}</b> · Balanced ${fmt(nr.nestedBalancedAccuracy)}<br>`
+      + `嵌套精度（外层 OOF 汇总） <b>${fmt(nr.nestedAccuracy)}</b> · Balanced ${fmt(nr.nestedBalancedAccuracy)}<br>`
       + `同参数普通 CV <b>${fmt(nr.plainAccuracy)}</b> · Balanced ${fmt(nr.plainBalancedAccuracy)}<br>`
       + `与固定参数普通 CV 之差 <b>${pp(nr.optimism)}</b>`
       + `<span class="muted">（为正是因为内层选出了更合适的参数；只有当普通 CV 的参数是"看着结果调的"时，这个数才是乐观偏差）</span>`
@@ -1775,7 +1920,7 @@
     const ctrl = el('div', { style: 'display:flex;gap:8px;margin:10px 0;flex-wrap:wrap;align-items:center' });
     const btnInject = el('button', { class: 'ghost mini', text: '注入 10% 模拟缺失' });
     btnInject.onclick = () => {
-      let a = (q.seed || 42) >>> 0;
+      let a = (q.seed ?? 42) >>> 0;
       const rnd = () => { a = (a + 0x6D2B79F5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
       const base = S.rowsRaw || S.rows;
       const rows = base.map(r => r.slice());
@@ -1939,15 +2084,15 @@
     }
     pane.appendChild(previewBox);
 
-    /* --- 严格无泄漏 CV --- */
-    pane.appendChild(el('h3', { text: '严格无泄漏交叉验证', style: 'margin-top:24px' }));
+    /* --- 训练折内预处理的严格 CV --- */
+    pane.appendChild(el('h3', { text: '严格交叉验证（训练折内预处理）', style: 'margin-top:24px' }));
     pane.appendChild(el('div', { class: 'muted', html:
       '每折内部：填补 → 分位数 → 离散化 → 建模，全部只用训练折；验证折只做 transform。' }));
 
     const kv = el('input', { type: 'number', value: q.k, min: '2', max: '10' });
     kv.onchange = () => { q.k = Math.max(2, +kv.value || 5); };
     const sv = el('input', { type: 'number', value: q.seed });
-    sv.onchange = () => { q.seed = +sv.value || 42; };
+    sv.onchange = () => { q.seed = sv.value === '' ? 42 : +sv.value; };
     pane.appendChild(el('div', { style: 'display:flex;gap:10px;margin:10px 0;flex-wrap:wrap' }, [
       el('div', { style: 'width:100px' }, [el('div', { class: 'muted', text: '折数 K' }), kv]),
       el('div', { style: 'width:120px' }, [el('div', { class: 'muted', text: '随机种子' }), sv])
@@ -1964,7 +2109,8 @@
       try {
           const target = S.target || names[names.length - 1];
           const idxT = names.indexOf(target);
-          const factorIdx = names.map((n, j) => j).filter(j => j !== idxT && S.numeric.includes(names[j]));
+          const input = analysisInput(WR);
+          const factorIdx = input.names.map(n => names.indexOf(n));
           if (factorIdx.length < 1) throw new Error('至少需要一个数值型条件变量');
           const rawX = WR.map(r => factorIdx.map(j => r[j]));
           const yv = WR.map(r => r[idxT]);
@@ -1974,39 +2120,15 @@
             k: q.k, seed: q.seed,
             impute: q.strategy, knn: { k: q.knnK, weighted: q.weighted },
             lowPct: S.params.lowPct || 25, highPct: S.params.highPct || 75,
-            levels, drops: Math.min(400, S.params.drops || 400),
+            levels, drops: S.params.drops,
             treeDepth: S.params.treeDepth || 3,
             minLeaf: Math.max(10, Math.round(WR.length / 40))
           };
-          const gCol = names.find(n => S.roles[n] === 'group');
-          const groups = gCol ? WR.map(r2 => r2[names.indexOf(gCol)]) : null;
-
-          // 时间切分：找了 time 角色列就按它排序，交给 crossValidateStrict 顺序切段
-          const tCol = names.find(n => S.roles[n] === 'time');
-          let timeOrder = null;
-          if (tCol) {
-            const ti = names.indexOf(tCol);
-            const idxAll = WR.map((_, i) => i);
-            const val = i => {
-              const v = WR[i][ti];
-              const num = typeof v === 'number' ? v : Date.parse(v);
-              return Number.isFinite(num) ? num : NaN;
-            };
-            const okAll = idxAll.filter(i => Number.isFinite(val(i)));
-            // 时间列有缺失就明确说，不静默丢弃
-            if (okAll.length < idxAll.length) {
-              toast(`时间列「${tCol}」有 ${idxAll.length - okAll.length} 行无法解析，这些行不参与时间切分`, 6000);
-            }
-            if (okAll.length >= 20) timeOrder = okAll.sort((a, b) => val(a) - val(b));
-          }
-          cvOpts.timeOrder = (timeOrder && WR === S.rows) ? timeOrder : null;
-
-          // OOF 追回 rowId：只有 WR 就是原始行表时才可靠
-          cvOpts.rowIds = (WR === S.rows && S.res && S.res.meta && S.res.meta.rowIds)
-            ? S.res.meta.rowIds
-            : null;
-          cvOpts.targetType = (S.res && S.res.meta && S.res.meta.targetType && S.res.meta.targetType.type) || undefined;
-          cvOpts.targetLevels = (S.res && S.res.meta && S.res.meta.targetType && S.res.meta.targetType.levelValues) || undefined;
+          const groups = input.groups;
+          Object.assign(cvOpts, {
+            timeOrder: input.timeOrder, timeValues: input.timeValues, rowIds: input.rowIds,
+            targetType: input.targetType, targetLevels: input.targetLevels
+          });
           let cv;
           try {
             cv = await WK.run('strictCV',
@@ -2042,34 +2164,24 @@
       try {
         const target = S.target || names[names.length - 1];
         const idxT = names.indexOf(target);
-        const factorIdx = names.map((n, j) => j).filter(j => j !== idxT && S.numeric.includes(names[j]));
+        const input = analysisInput(WR);
+        const factorIdx = input.names.map(n => names.indexOf(n));
         if (factorIdx.length < 1) throw new Error('至少需要一个数值型条件变量');
         const rawX = WR.map(r => factorIdx.map(j => r[j]));
         const yRaw = WR.map(r => r[idxT]);
         const fnames = factorIdx.map(j => names[j]);
-        const gCol = names.find(n => S.roles[n] === 'group');
-        const groups = gCol ? WR.map(r2 => r2[names.indexOf(gCol)]) : null;
-        const tCol = names.find(n => S.roles[n] === 'time');
+        const groups = input.groups;
         const nestOpt = {
           k: q.k, innerK: 3, seed: q.seed,
           impute: q.strategy,
           knn: { k: Number(q.knnK) || 5, weighted: q.weighted === true || q.weighted === 'true' },
           lowPct: S.params.lowPct || 25, highPct: S.params.highPct || 75,
-          levels, drops: Math.min(150, S.params.drops || 150),
+          levels, drops: S.params.drops,
           treeDepth: S.params.treeDepth || 3,
           minLeaf: Math.max(10, Math.round(WR.length / 40)),
-          targetType: (S.res && S.res.meta && S.res.meta.targetType && S.res.meta.targetType.type) || undefined,
-          rowIds: (WR === S.rows && S.res && S.res.meta) ? S.res.meta.rowIds : null
+          targetType: input.targetType, targetLevels: input.targetLevels,
+          timeOrder: input.timeOrder, timeValues: input.timeValues, rowIds: input.rowIds
         };
-        if (tCol) {
-          const ti = names.indexOf(tCol);
-          const okAll = WR.map((_, i) => i).filter(i => Number.isFinite(typeof WR[i][ti] === 'number' ? WR[i][ti] : Date.parse(WR[i][ti])));
-          if (okAll.length >= 20 && okAll.length === WR.length) nestOpt.timeOrder = okAll.sort((a, b) => {
-            const va = typeof WR[a][ti] === 'number' ? WR[a][ti] : Date.parse(WR[a][ti]);
-            const vb = typeof WR[b][ti] === 'number' ? WR[b][ti] : Date.parse(WR[b][ti]);
-            return va - vb;
-          });
-        }
         setBusy(true, '嵌套验证…');
         let nr, via = 'worker';
         const payload = toPlain({
@@ -2081,8 +2193,7 @@
           nr = await WK.run('nestedCV', payload,
             { onProgress: p3 => setBusy(true, '嵌套验证 ' + p3 + '%'), timeoutMs: 300000 });
         } catch (e3) {
-          // Worker 只是提速手段，不是必需。任何 Worker 侧失败都退回主线程重算，
-          // 而不是把用户挡在"嵌套验证不可用"这里。
+          if (e3.message !== 'NO_WORKER') throw e3;
           via = 'main';
           console.warn('嵌套验证 Worker 失败，回退主线程：', e3 && e3.message);
           nr = C.nestedCV(payload.rawX, payload.yRaw, payload.names,
@@ -2137,7 +2248,7 @@
 
         // 混淆矩阵
         const cm = cv.oof.confusion;
-        const L = C.LEVEL_LABELS[S.params.levels || 3];
+        const L = cv.targetLevels ? cv.targetLevels.map(String) : C.LEVEL_LABELS[S.params.levels || 3];
         const t4 = el('table');
         t4.appendChild(el('thead', { html: '<tr><th>真实 \\ 预测</th>' + L.map(x => `<th>${x}</th>`).join('') + '</tr>' }));
         const b4 = el('tbody');
@@ -2230,12 +2341,12 @@
       const maxC = Math.max(...c.counts);
       const bars = c.counts.map((v, i) =>
         `<div style="display:inline-block;width:52px;margin-right:4px">
-           <div class="bar"><i style="width:${Math.round(100 * v / Math.max(1, maxC))}%;background:${PAL[i]}"></i></div>
+           <div class="bar"><i style="width:${Math.round(100 * v / Math.max(1, maxC))}%;background:${PAL[i % PAL.length]}"></i></div>
            <span class="muted" style="font-size:10.5px">${v}</span></div>`).join('');
       body.appendChild(el('tr', { html:
         `<td>${esc(label)}</td><td style="text-align:left">${bars}</td>
-         <td>${c.thresholds.map(t => t.toFixed(2)).join(' / ')}</td>
-         <td>${c.meanMu.toFixed(3)}</td><td>${pct(c.ambiguousRate)}</td>` }));
+         <td>${c.discrete ? c.labels.map(esc).join(' / ') : c.thresholds.map(t => t.toFixed(2)).join(' / ')}</td>
+         <td>${c.discrete ? '原类别映射' : c.meanMu.toFixed(3)}</td><td>${c.discrete ? '不适用' : pct(c.ambiguousRate)}</td>` }));
     });
     tb.appendChild(body); pane.appendChild(tb);
 
@@ -2653,51 +2764,37 @@
     });
     pane.appendChild(g);
 
+    if (r.bnError || !r.stateSpace || !r.stateSpace.ok) return;
+
     // 目标先验
     const prior = C.bnInfer(bn, {});
     pane.appendChild(el('h3', { text: `${r.meta.target} 的先验分布（无证据）`, style: 'margin-top:14px' }));
     pane.appendChild(barRow(L, prior.posterior));
 
-    // 敏感度：变量 × 等级 → 目标为"最高档"的概率
-    pane.appendChild(el('h3', { text: '敏感度分析：单个变量固定在不同等级时，目标最高档的概率', style: 'margin-top:20px' }));
-    const tb = el('table');
-    tb.appendChild(el('thead', { html:
-      '<tr><th>变量</th>' + L.map(l => `<th>固定为「${l}」</th>`).join('') + '<th>变化幅度</th></tr>' }));
-    const b = el('tbody');
-    (r.sens || []).forEach(({ f, rows }) => {
-      const vals = rows.map(x => x.posterior[levels - 1]);
-      const spread = Math.max(...vals) - Math.min(...vals);
-      const cells = vals.map((v, i) => {
-        const isMax = v === Math.max(...vals), isMin = v === Math.min(...vals);
-        const color = isMax ? '#34d399' : isMin ? '#ef4444' : '#dfe9f3';
-        return `<td style="color:${color};font-weight:${isMax || isMin ? 600 : 400}">${(v * 100).toFixed(1)}%</td>`;
-      }).join('');
-      b.appendChild(el('tr', { html: `<td>${esc(f)}</td>${cells}<td>${(spread * 100).toFixed(1)} pp</td>` }));
-    });
-    tb.appendChild(b);
-    pane.appendChild(tb);
-    pane.appendChild(el('div', { class: 'muted', style: 'margin-top:8px', html:
-      `读法：把「融资约束」固定在“低”时，${r.meta.target} 为「${L[levels - 1]}」的概率是多少。
-       <b>变化幅度（pp）越大，说明这个变量越关键</b>。` }));
-
-    // 逐变量条形对比
-    const top = (r.sens || []).slice().sort((a, c) => {
-      const sp = x => Math.max(...x.rows.map(v => v.posterior[levels - 1])) - Math.min(...x.rows.map(v => v.posterior[levels - 1]));
-      return sp(c) - sp(a);
-    })[0];
-    if (top) {
-      pane.appendChild(el('h3', { text: `影响最大：${top.f}`, style: 'margin-top:20px' }));
-      top.rows.forEach((row, i) => {
-        pane.appendChild(el('div', { class: 'row', html:
-          `<span>${top.f} = ${L[i]}</span><b>${(row.posterior[levels - 1] * 100).toFixed(1)}%</b>` }));
-        pane.appendChild(el('div', { class: 'bar' }, [
-          el('i', { style: `width:${Math.max(2, row.posterior[levels - 1] * 100)}%;background:${PAL[i]}` })]));
+    pane.appendChild(el('h3',{text:'条件敏感度：选择一个目标类别'}));
+    const chosen = el('select',{'aria-label':'观察目标类别',style:'max-width:260px'});
+    L.forEach((label,i)=>chosen.appendChild(el('option',{value:i,text:String(label)})));
+    chosen.value = String(L.length-1);
+    pane.appendChild(chosen);
+    const output=el('div',{style:'margin-top:12px'}); pane.appendChild(output);
+    const draw=()=>{
+      const targetCode=Number(chosen.value);
+      const table=el('table',{});
+      table.appendChild(el('thead',{html:'<tr><th>条件变量</th><th>固定状态</th><th>目标概率</th><th>相对先验</th></tr>'}));
+      const body=el('tbody',{});
+      (r.sens||[]).forEach(({f,rows})=>{
+        const labels=r.calibration.factors[f].labels;
+        rows.forEach(row=>{
+          const probability=row.posterior ? row.posterior[targetCode] : null;
+          body.appendChild(el('tr',{html:`<td>${esc(f)}</td><td>${esc(labels[row.state]??row.state)}</td>`+
+            `<td>${probability===null?'证据不可用':pct(probability)}</td>`+
+            `<td>${probability===null?'—':((probability-prior.posterior[targetCode])*100).toFixed(1)+' pp'}</td>`}));
+        });
       });
-    }
-
-    pane.appendChild(el('div', { class: 'rule', style: 'margin-top:16px', html:
-      '<b>注意</b>：结构来自数据的 BIC 评分，边方向代表"条件依赖"的最优解释，<b>不等于因果</b>。' +
-      '书第 6 章用 Netica 做同样的事（结构学习 + 参数学习 + 灵敏度分析），这里在浏览器里复现了核心三步。' }));
+      table.appendChild(body);output.replaceChildren(table);
+    };
+    chosen.onchange=draw;draw();
+    pane.appendChild(el('div',{class:'hint',text:'概率来自观测数据的条件依赖。固定一个观测变量不等于实施干预，不能据此判定因果效应。'}));
   }
 
   function barRow(labels, probs) {
@@ -2705,7 +2802,7 @@
     labels.forEach((l, i) => {
       wrap.appendChild(el('div', { class: 'row', html: `<span>${l}</span><b>${(probs[i] * 100).toFixed(1)}%</b>` }));
       wrap.appendChild(el('div', { class: 'bar' }, [
-        el('i', { style: `width:${Math.max(1, probs[i] * 100)}%;background:${PAL[i]}` })]));
+        el('i', { style: `width:${Math.max(1, probs[i] * 100)}%;background:${PAL[i % PAL.length]}` })]));
     });
     return wrap;
   }
@@ -2785,15 +2882,19 @@
     if (!S.extra.robust) {
       pane.appendChild(el('div', { class: 'muted', style: 'margin-top:16px', html: '正在跑 7 组参数变体…' }));
       setTimeout(() => {
+        if (S.res !== r) return;
         try {
           const idxT = S.columns.indexOf(r.meta.target);
           const idxF = r.meta.factors.map(f => S.columns.indexOf(f));
           const keep = S.rows.filter(x => C.isNum(x[idxT]) && idxF.every(j => C.isNum(x[j])));
           const X = keep.map(x => idxF.map(j => x[j]));
           const yv = keep.map(x => x[idxT]);
-          S.extra.robust = C.robustness(X, yv, r.meta.factors, r.calibration.labels, r.meta.params);
+          S.extra.robust = C.robustness(X, yv, r.meta.factors, r.calibration.labels, r.meta.params, {
+            targetType: r.meta.targetType.type,
+            targetLevels: r.calibration.target.levelValues
+          });
         } catch (e) { S.extra.robust = []; console.error(e); }
-        renderRobust();
+        if (S.tab === 'robust') renderRobust();
       }, 30);
       return;
     }
@@ -3087,9 +3188,9 @@
         if (q.weightCol) {
           const wi = S.columns.indexOf(q.weightCol);
           if (wi < 0) throw new Error(`权重列「${q.weightCol}」不在当前数据里`);
-          wts = rowsUse.map(r => r[wi]);
-          if (wts.some(v => !Number.isFinite(v) || v <= 0)) {
-            throw new Error('权重列必须全部为有限的正数');
+          wts = S.rows.map(r => r[wi]);
+          if (wts.some(v => !Number.isFinite(v) || v < 0)) {
+            throw new Error('频率权重必须全部为有限非负数（零权重不贡献拟合）');
           }
         }
         const payload = { rows: S.rows, y: yv, spec: { numCols, catCols }, family, weights: wts };
@@ -3360,7 +3461,7 @@
     const inB = el('input', { type: 'number', value: q.B, min: '10', max: '2000', step: '10' });
     inB.onchange = () => { q.B = Math.max(10, Math.min(2000, +inB.value || 200)); };
     const inSeed = el('input', { type: 'number', value: q.seed });
-    inSeed.onchange = () => { q.seed = +inSeed.value || 42; };
+    inSeed.onchange = () => { q.seed = inSeed.value === '' ? 42 : +inSeed.value; };
     const inK = el('input', { type: 'number', value: q.k, min: '2', max: '8' });
     inK.onchange = () => { q.k = Math.max(2, +inK.value || 3); };
     const inFrac = el('input', { type: 'number', value: q.fraction, min: '0.1', max: '1', step: '0.1' });
@@ -3404,11 +3505,8 @@
       try {
         const task = S.target || S.columns[S.columns.length - 1];
         const idxT = S.columns.indexOf(task);
-        // 注意：不要用 map 的形参在 filter 里引用（作用域已结束，会 ReferenceError）
-        const factorIdx = S.columns.map((_, j) => j).filter(j => {
-          const nm = S.columns[j];
-          return j !== idxT && S.roles[nm] !== 'id' && S.roles[nm] !== 'exclude' && S.numeric.includes(nm);
-        });
+        const input = analysisInput(S.rows);
+        const factorIdx = input.names.map(n => S.columns.indexOf(n));
         if (!factorIdx.length) throw new Error('没有可用的数值型条件变量');
         const data = {
           X: S.rows.map(r => factorIdx.map(j => r[j])),
@@ -3432,9 +3530,9 @@
         const opt = {
           task: q.task, B: q.B, seed: q.seed, method: q.method, fraction: q.fraction,
           replacement: q.replacement, k: q.k, maxDepth: q.maxDepth,
-          levels: S.params.levels || 3, drops: Math.min(200, S.params.drops || 200),
+          levels: S.params.levels || 3, drops: S.params.drops,
           lowPct: S.params.lowPct, highPct: S.params.highPct,
-          targetType: (tgtTypeInfo && tgtTypeInfo.type) || 'continuous',
+          targetType: input.targetType, targetLevels: input.targetLevels,
           bnThreshold: q.threshold, impute: 'median'
         };
         let res;
@@ -5120,7 +5218,10 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
       const L = r2.calibration.labels;
       const rows = keep.map((x, i) => {
         const codes = r2.meta.factors.map(f => r2.calibration.factors[f].codes[i]).concat([r2.calibration.target.codes[i]]);
-        return [i + 1, ...codes.map(c => L[c] ?? c)];
+        return [r2.meta.rowIds[i], ...codes.map((c,j) => {
+            const labels = j < r2.meta.factors.length ? r2.calibration.factors[r2.meta.factors[j]].labels : L;
+            return labels[c] ?? c;
+          })];
       });
       download(`DAC校准数据_${stamp()}.csv`, '\ufeff' + C.toCSV(head, rows), 'text/csv');
     };
@@ -5136,7 +5237,10 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
         const rows = keep.map((x, i) => {
           const codes = r2.meta.factors.map(f => r2.calibration.factors[f].codes[i])
             .concat([r2.calibration.target.codes[i]]);
-          return [i + 1, ...codes.map(c => L2[c] ?? c)];
+          return [r2.meta.rowIds[i], ...codes.map((c,j) => {
+            const labels = j < r2.meta.factors.length ? r2.calibration.factors[r2.meta.factors[j]].labels : L2;
+            return labels[c] ?? c;
+          })];
         });
         const buf = await C.toXLSX(head, rows, 'DAC校准数据');
         const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
@@ -5457,7 +5561,7 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
       name: (S.projectName || '未命名项目'),
       createdAt: new Date().toISOString(),
       app: {
-        name: 'DAC Workbench', version: '2.7', algo: 'v4.8',
+        name: 'DAC Workbench', version: '6.5.0', algo: 'v6.5',
         // 源提交与部署提交要能区分：构建时由 build 脚本注入
         buildDigest: (window.__BUILD__ && window.__BUILD__.digest) || null,
         buildTime: (window.__BUILD__ && window.__BUILD__.time) || null
@@ -5466,6 +5570,7 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
         name: S.fileName || (S.sheets ? S.sheets[S.sheetIdx].name : '内置示例'),
         rows: S.rows.length, cols: S.columns.length,
         columns: S.columns.slice(),
+        meta: S.dsMeta || null,
         // 默认不打包原始数据，避免项目文件失控膨胀与隐私外泄
         data: includeData ? (S.rowsRaw || S.rows) : null,
         // 全量指纹（含序列化版本、列名、类型、每行每格）
@@ -5482,7 +5587,7 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
       // 本次运行的唯一标识（数据 + 配置 + 时间戳），用于把结果与输入绑定
       runId: (S.runId || null),
       roles: S.roles,
-      selections: { target: S.target, factors: S.factors },
+      selections: { target: S.target, factors: S.factors, targetType: S.targetType || 'auto' },
       params: S.params,
       results: r ? {
         usedRows: r.meta.usedRows,
@@ -5510,7 +5615,7 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
   window.__dacImportProject = (file) => importProjectFile(file);
 
   function importProjectFile(file) {
-    file.text().then(txt => {
+    return file.text().then(async txt => {
       let proj;
       try { proj = JSON.parse(txt); } catch (e) { throw new Error('不是合法 JSON'); }
       if (!proj.format || !String(proj.format).startsWith('dac-project/')) {
@@ -5555,11 +5660,16 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
         S.projWarn = null;
         return false;
       };
-      const restored = verify();
-      if (restored && restored.then) restored.then(() => { if (proj.runId) S.runId = proj.runId; });
+      invalidateResults();
+      await verify();
+      if (proj.runId) S.runId = proj.runId;
+      S.dsMeta = proj.dataset && proj.dataset.meta || null;
+      S.importMeta = proj.dataset && proj.dataset.importMeta || null;
       if (proj.roles) S.roles = Object.assign({}, proj.roles);
       if (proj.selections) {
         if (proj.selections.target) S.target = proj.selections.target;
+        S.targetType = proj.selections.targetType || 'auto';
+        $('#targetType').value = S.targetType;
         if (Array.isArray(proj.selections.factors)) S.factors = proj.selections.factors.slice();
       }
       // 关键：把目标同步回下拉框。否则 run() 里 S.target = $('#target').value
@@ -5588,7 +5698,7 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
         if (pp.k) { $('#k').value = pp.k; $('#vK').textContent = pp.k; }
         if (pp.treeDepth) { $('#depth').value = pp.treeDepth; $('#vDepth').textContent = pp.treeDepth; }
         if (pp.netThreshold) { $('#net').value = Math.round(pp.netThreshold * 100); $('#vNet').textContent = pp.netThreshold.toFixed(2); }
-        if (pp.seed) $('#seed').value = pp.seed;
+        if (pp.seed !== undefined) $('#seed').value = pp.seed;
       }
       S.projectName = proj.name || S.projectName;
       S.extra = {};
@@ -5679,7 +5789,7 @@ ${rules.map(x => `IF ${x.conditions.join(' 且 ')} → ${r.meta.target} = ${x.th
     const btn = document.getElementById('btnPalette');
     if (!panel || !btn) return;
 
-    const defaults = { theme: 'dark', accent: '', stripe: 'weak', font: '1' };
+    const defaults = { theme: 'light', accent: '', stripe: 'weak', font: '1' };
     let cfg = Object.assign({}, defaults);
     try {
       const raw = localStorage.getItem(KEY);

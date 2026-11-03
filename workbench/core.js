@@ -720,6 +720,23 @@
     return { codes, muMax, mu2, lut: true };
   }
 
+  function encodeTarget(values, opt) {
+    const o = opt || {};
+    const type = o.targetType || detectTargetType(values).type;
+    if (!['binary','categorical','nominal','ordinal'].includes(type)) {
+      return Object.assign(calibrate(values, o), { targetType: type, discrete: false });
+    }
+    const levelValues = o.targetLevels && o.targetLevels.length ? o.targetLevels.slice()
+      : [...new Set(values.filter(v => v !== null && v !== undefined && v !== '' && !(typeof v === 'number' && !Number.isFinite(v))))]
+        .sort((a,b) => typeof a === 'number' && typeof b === 'number' ? a-b : String(a).localeCompare(String(b)));
+    const map = new Map(levelValues.map((v,i) => [String(v),i]));
+    const codes = values.map(v => map.has(String(v)) ? map.get(String(v)) : -1);
+    const counts = levelValues.map((_,i) => codes.filter(c => c === i).length);
+    return { codes, counts, levels: levelValues.length, labels: levelValues.map(String),
+      levelValues, targetType: type, discrete: true, clouds: [], thresholds: [],
+      meanMu: null, ambiguousRate: null, degenerate: levelValues.length < 2 };
+  }
+
   function calibrate(values, opt) {
     const { lowPct = 25, highPct = 75, drops = 500, levels = 3, seed = 42 } = opt || {};
     const idx = [];
@@ -1046,7 +1063,7 @@
     return `${name} 属于 ${use[0]}~${use[use.length - 1]}`;
   }
 
-  function collectRules(node, featureNames, labels, conds, out, condsRaw) {
+  function collectRules(node, featureNames, labels, conds, out, condsRaw, featureLabels) {
     out = out || [];
     conds = conds || [];
     condsRaw = condsRaw || [];
@@ -1065,13 +1082,15 @@
       return out;
     }
     const name = featureNames[node.f];
-    const k = Math.max(0, Math.min(labels.length - 1, Math.floor(node.t + 1e-9)));
+    // Predictor states and outcome categories can have different cardinalities.
+    const stateLabels = featureLabels ? featureLabels[node.f] : labels;
+    const k = Math.max(0, Math.min(stateLabels.length - 1, Math.floor(node.t + 1e-9)));
     collectRules(node.left, featureNames, labels,
-      conds.concat([condDesc(name, node.t, labels, true)]), out,
-      condsRaw.concat([{ f: name, t: node.t, left: true, lo: 0, hi: k }]));
+      conds.concat([condDesc(name, node.t, stateLabels, true)]), out,
+      condsRaw.concat([{ f: name, t: node.t, left: true, lo: 0, hi: k }]), featureLabels);
     collectRules(node.right, featureNames, labels,
-      conds.concat([condDesc(name, node.t, labels, false)]), out,
-      condsRaw.concat([{ f: name, t: node.t, left: false, lo: k + 1, hi: labels.length - 1 }]));
+      conds.concat([condDesc(name, node.t, stateLabels, false)]), out,
+      condsRaw.concat([{ f: name, t: node.t, left: false, lo: k + 1, hi: stateLabels.length - 1 }]), featureLabels);
     return out;
   }
 
@@ -1087,7 +1106,7 @@
     return {
       root, importances,
       accuracy: correct / X.length,
-      rules: collectRules(root, featureNames, labels),
+      rules: collectRules(root, featureNames, labels, null, null, null, o.featureLabels),
       leaves: countLeaves(root)
     };
   }
@@ -1257,7 +1276,7 @@
   function stratifiedFolds(y, K, seed) {
     const byClass = {};
     y.forEach((c, i) => { (byClass[c] = byClass[c] || []).push(i); });
-    const r = rng(seed || 42);
+    const r = rng(seed ?? 42);
     Object.keys(byClass).forEach(k => {
       const arr = byClass[k];
       for (let i = arr.length - 1; i > 0; i--) {
@@ -1317,7 +1336,7 @@
       byGroup.get(k).push(i);
     });
     const keys = [...byGroup.keys()];
-    const r = rng(seed || 42);
+    const r = rng(seed ?? 42);
     for (let i = keys.length - 1; i > 0; i--) {
       const j = Math.floor(r() * (i + 1));
       [keys[i], keys[j]] = [keys[j], keys[i]];
@@ -1417,7 +1436,7 @@
     if (y.length < 30) warnings.push(`样本量仅 ${y.length}，交叉验证结果仅供参考`);
     if (minCount < 5) warnings.push(`存在样本数 < 5 的类别，单类指标不可靠`);
 
-    const foldIdx = stratifiedFolds(y, effK, (opt && opt.seed) || 42);
+    const foldIdx = stratifiedFolds(y, effK, opt?.seed ?? 42);
     const perFold = [];
     const oofPred = new Array(X.length).fill(-1);
 
@@ -1516,7 +1535,7 @@
 
     // 目标变量类型：离散目标不再用云模型校准（否则 0/1 会被分位数切成"等级"，类别定义被篡改）
     const tType = o.targetType || detectTargetType(yvRaw).type;
-    const discreteTarget = (tType === 'binary' || tType === 'categorical' || tType === 'ordinal');
+    const discreteTarget = ['binary','categorical','nominal','ordinal'].includes(tType);
     let yvEnc = null, yLevels = null;
     if (discreteTarget) {
       const lv = (o.targetLevels && o.targetLevels.length)
@@ -1549,7 +1568,14 @@
         test: (f.test || []).slice()
       }));
       splitKind = 'fixed';
-    } else if (o.timeOrder && o.timeOrder.length === yRaw.length) {
+    } else if (o.timeOrder) {
+      if (!Array.isArray(o.timeOrder) || o.timeOrder.length !== yRaw.length ||
+          new Set(o.timeOrder).size !== yRaw.length || o.timeOrder.some(i => !Number.isInteger(i) || i < 0 || i >= yRaw.length)) {
+        return { ok: false, reason: '时间顺序必须包含每个原始行恰好一次' };
+      }
+      if (o.timeValues && (o.timeValues.length !== yRaw.length || o.timeValues.some(v => !Number.isFinite(v)))) {
+        return { ok: false, reason: '时间列存在缺失或无效时间，不能降级为随机切分' };
+      }
       // timeOrder 是原始行下标按时间升序排好的序列
       const ordered = o.timeOrder.filter(i => validRowsSet.has(i));
       const K = Math.max(2, Math.min(o.k, Math.floor(ordered.length / 10) || 2));
@@ -1557,7 +1583,10 @@
       for (let f = 0; f < K; f++) {
         const a = Math.floor(f * ordered.length / K);
         const b = Math.floor((f + 1) * ordered.length / K);
-        folds.push(ordered.slice(a, b).map(i => validRows.indexOf(i)));
+        const testRaw = ordered.slice(a, b);
+        const cutoff = o.timeValues && testRaw.length ? Math.min(...testRaw.map(i => o.timeValues[i])) : null;
+        const trainRaw = ordered.slice(0,a).filter(i => cutoff === null || o.timeValues[i] < cutoff);
+        folds.push({ train: trainRaw.map(i => validRows.indexOf(i)), test: testRaw.map(i => validRows.indexOf(i)) });
       }
       splitKind = 'time';
     } else if (groups && groups.length === yRaw.length) {
@@ -1592,7 +1621,7 @@
       if (!Array.isArray(fd) && Array.isArray(fd.train)) {
         // 调用方给了明确的训练集
         trainIdx.push(...fd.train);
-        if (!trainIdx.length) { perFold.push({ fold: f + 1, ok: false, reason: '训练集为空' }); continue; }
+        if (trainIdx.length < (splitKind === 'time' ? 15 : 1)) continue;
       } else if (splitKind === 'time') {
         // 只允许用比当前折更早的样本训练，绝不使用未来数据
         const minTest = Math.min(...testIdx);
@@ -1666,7 +1695,10 @@
         : calibrateWith(yTe, yBounds, { levels: o.levels, drops: o.drops, seed: o.seed }).codes;
 
       // ---- 3c) 建模（只用训练折）----
-      const tree = cart(XtrCodes, yTrCodes, names, effLabels, { maxDepth: o.treeDepth, minLeaf: o.minLeaf });
+      const tree = cart(XtrCodes, yTrCodes, names, effLabels, {
+        maxDepth: o.treeDepth, minLeaf: o.minLeaf,
+        featureLabels: colLevels.map(lv => LEVEL_LABELS[lv])
+      });
       const pred = XteCodes.map(r => predictTree(tree.root, r));
       testIdx.forEach((i, k) => { oofPred[i] = pred[k]; oofTrue[i] = yTeCodes[k]; });
 
@@ -1680,7 +1712,8 @@
         balancedAccuracy: teM.balancedAccuracy, macroF1: teM.macroF1,
         perClass: teM.perClass, confusion: teM.confusion,
         // 测试折逐条预测：嵌套验证要拿它算"纯测试集"精度，别的统计也要
-        testPred: pred.slice()
+        testPred: pred.slice(),
+        testTrue: yTeCodes.slice()
       });
 
       records.push({
@@ -1705,7 +1738,7 @@
       if (oofPred[i] >= 0 && oofTrue[i] >= 0) { keepIdx.push(i); keepPred.push(oofPred[i]); keepTrue.push(oofTrue[i]); }
     }
     const oofM = evalMetrics(keepTrue, keepPred, nLevels);
-    const testAcc = perFold.map(f => f.testAccuracy);
+      const testAcc = perFold.map(f => f.testAccuracy).filter(Number.isFinite);
 
     return {
       ok: perFold.length > 0,
@@ -1742,6 +1775,9 @@
         })()
       },
       splitKind,
+      timeOrder: o.timeOrder || null,
+      timeValues: o.timeValues || null,
+      config: { lowPct: o.lowPct, highPct: o.highPct, levels: o.levels, drops: o.drops, treeDepth: o.treeDepth, minLeaf: o.minLeaf, names: names.slice() },
       mean: mean(testAcc) || 0,
       std: std(testAcc) || 0,
       trainMean: mean(perFold.map(f => f.trainAccuracy)) || 0,
@@ -1792,16 +1828,19 @@
     }
 
     const base = { lowPct: 25, highPct: 75, levels: 3, drops: 200 };
-    const pick = Object.assign({}, base, {
+    const pick = Object.assign({}, base, o, {
       impute: o.impute || 'median',
       knn: o.knn,
-      targetType: o.targetType
+      targetType: outer.targetType,
+      targetLevels: outer.targetLevels || o.targetLevels,
+      fixedFolds: null, timeOrder: null, timeValues: null, onProgress: null
     });
 
     const perFold = [];
     const oofPred = [];
     const oofTrue = [];
     const oofRowId = [];
+    const oofOriginal = [], oofFold = [];
     const selected = [];
     let done = 0;
 
@@ -1813,6 +1852,9 @@
       const Xtr = trRaw.map(i => rawX[i].slice());
       const yTr = trRaw.map(i => yRaw[i]);
       const gTr = groups ? trRaw.map(i => groups[i]) : null;
+      const localPos = new Map(trRaw.map((i,j) => [i,j]));
+      const innerTimeOrder = o.timeOrder ? o.timeOrder.filter(i => localPos.has(i)).map(i => localPos.get(i)) : null;
+      const innerTimeValues = o.timeValues ? trRaw.map(i => o.timeValues[i]) : null;
 
       // ---- 内层：只在训练折内部网格搜索 ----
       let best = null;
@@ -1822,6 +1864,7 @@
           inner = crossValidateStrict(Xtr, yTr, names, labels,
             Object.assign({}, pick, {
               k: Math.min(o.innerK, 3),
+              timeOrder: innerTimeOrder, timeValues: innerTimeValues,
               treeDepth: g.treeDepth,
               minLeaf: Math.max(3, Math.min(g.minLeaf, Math.floor(Xtr.length / 12))),
               seed: o.seed
@@ -1857,7 +1900,7 @@
             treeDepth: best.params.treeDepth,
             minLeaf: Math.max(3, Math.min(best.params.minLeaf, Math.floor(Xtr.length / 12))),
             seed: o.seed,
-            targetType: o.targetType,
+            targetType: outer.targetType,
             fixedFolds: [{
               train: Array.from({ length: nTr }, (_, k) => k),
               test: Array.from({ length: Xte.length }, (_, k) => nTr + k)
@@ -1890,7 +1933,9 @@
         teRaw.forEach((rawIdx, k) => {
           oofRowId.push((o.rowIds && o.rowIds[rawIdx] !== undefined) ? o.rowIds[rawIdx] : (rawIdx + 1));
           oofPred.push(preds ? preds[k] : -1);
-          oofTrue.push(yTe[k]);
+          oofTrue.push(pf.testTrue[k]);
+          oofOriginal.push(yTe[k]);
+          oofFold.push(rec.fold);
         });
       }
       done++;
@@ -1900,10 +1945,9 @@
     }
 
     const okFolds = perFold.filter(f => f.ok && f.outerAcc !== null);
-    const meanOuter = okFolds.length
-      ? okFolds.reduce((a, f) => a + f.outerAcc, 0) / okFolds.length : null;
-    const meanOuterBal = okFolds.length
-      ? okFolds.reduce((a, f) => a + f.outerBalAcc, 0) / okFolds.length : null;
+    const pooled = oofPred.length ? evalMetrics(oofTrue, oofPred, outer.nLevels) : null;
+    const meanOuter = pooled ? pooled.accuracy : null;
+    const meanOuterBal = pooled ? pooled.balancedAccuracy : null;
 
     // 选参的稳定性：不同外层折选出不同参数，说明参数不稳、结论对外部条件敏感
     const paramKey = p => `d${p.treeDepth}-l${p.minLeaf}`;
@@ -1924,27 +1968,33 @@
         rowId: oofRowId,
         pred: oofPred,
         true: oofTrue,
+        original: oofOriginal,
+        fold: oofFold,
+        predLabel: oofPred.map(v => outer.targetLevels ? outer.targetLevels[v] : labels[v]),
+        trueLabel: oofTrue.map(v => outer.targetLevels ? outer.targetLevels[v] : labels[v]),
         n: oofRowId.length,
         accuracy: meanOuter,
         balancedAccuracy: meanOuterBal
       } : null,
-      // 嵌套 CV 的精度：这是无偏的泛化估计
+      // 外层测试记录的总体精度；不能无条件称为无偏估计。
       nestedAccuracy: meanOuter,
       nestedBalancedAccuracy: meanOuterBal,
       // 与之对比：用固定参数跑普通 CV 的精度
       plainAccuracy: outer.oof ? outer.oof.accuracy : null,
       plainBalancedAccuracy: outer.oof ? outer.oof.balancedAccuracy : null,
       // plain - nested。**只有当 plain 的参数是"看着 CV 结果调出来的"时**，
-      // 这个差才是乐观偏差；若 plain 的参数事先固定、没看过数据，两者都是无偏估计，
+      // 这个差才可用于讨论选参乐观偏差；若 plain 的参数事先固定，
       // 差可以是正也可以是负（内层选出了更合适的参数时就是负的）。
       optimism: (meanOuter !== null && outer.oof)
         ? outer.oof.accuracy - meanOuter : null,
       // 外层切分沿用同一种策略
       splitKind: outer.splitKind,
-      note: 'nestedAccuracy 是无偏泛化估计（外层测试折从不参与选参）。'
+      config: outer.config,
+      targetLevels: outer.targetLevels,
+      note: 'nestedAccuracy 由所有外层测试记录汇总；外层测试折不参与选参。'
           + 'plainAccuracy 用调用方给的固定参数跑普通 CV：'
           + '若这些参数是看着 CV 结果调出来的，plainAccuracy 偏乐观，两者之差才是"乐观偏差"；'
-          + '若参数事先固定、没看过数据，两者都是无偏估计，差可以为正也可以为负。'
+          + '若参数事先固定，两者估计对象不同，差可以为正也可以为负，均不能无条件称为无偏。'
     };
   }
 
@@ -1978,6 +2028,18 @@
     });
     push('split-disjoint', '训练折与验证折样本不重叠', overlap ? 'FAIL' : 'PASS',
       overlap ? ov.join('；') : `全部 ${recs.length} 折均无交集`);
+    if (cvResult.splitKind === 'time') {
+      const order = new Map((cvResult.timeOrder || []).map((v,i) => [v,i]));
+      const times = cvResult.timeValues;
+      const bad = recs.filter(r => {
+        const tr = r.trainRawIdx, te = r.testRawIdx;
+        const value = i => times ? times[i] : order.get(i);
+        return !tr.length || !te.length || !(Math.max(...tr.map(value)) < Math.min(...te.map(value)));
+      });
+      push('temporal-order', '训练样本严格早于验证样本', bad.length ? 'FAIL' : 'PASS',
+        bad.length ? '时间顺序异常：折 ' + bad.map(r => r.fold).join(',') :
+        (times ? '逐折比较真实时间值，重复时点未跨训练/测试边界' : '按调用方提供的时间排序位置检查；未提供真实时间值'));
+    }
 
     // 检查 2：填补器统计量 = 训练折统计量（重算比对）
     let impBad = [], impChecked = 0;
@@ -2054,7 +2116,7 @@
     const failed = items.filter(i => i.status === 'FAIL');
     return {
       ok: failed.length === 0,
-      verdict: failed.length === 0 ? '严格无泄漏' : '存在泄漏，不可作为正式验证结果',
+      verdict: failed.length === 0 ? '已检查项通过（不涵盖业务来源泄漏）' : '审计未通过，不可作为正式验证结果',
       items,
       failedCount: failed.length,
       checkedAt: Date.now()
@@ -2066,7 +2128,7 @@
     const out = [];
     ks.forEach(k => {
       try {
-        const km = kmeans(X, k, { seed: seed || 42, nInit: 6 });
+        const km = kmeans(X, k, { seed: seed ?? 42, nInit: 6 });
         out.push({
           k, inertia: km.inertia,
           silhouette: silhouette(km.Z, km.labels)
@@ -2082,17 +2144,25 @@
     const push = (label, over) => {
       const p = Object.assign({}, base, over);
       p.drops = Math.min(p.drops || 500, 200);
-      const labels = LEVEL_LABELS[p.levels] || baseLabels;
       try {
         const cal = {};
-        factors.forEach((f, i) => { cal[f] = calibrate(X.map(r => r[i]), p); });
-        const calY = calibrate(yv, p);
+        factors.forEach((f, i) => {
+          const col = X.map(r => r[i]);
+          const levels = detectTargetType(col).type === 'binary' ? 2 : p.levels;
+          cal[f] = calibrate(col, Object.assign({}, p, { levels }));
+        });
+        const calY = encodeTarget(yv, Object.assign({}, p, opt));
+        const labels = calY.labels;
         const Xc = X.map((_, i) => factors.map(f => cal[f].codes[i]));
-        const t = cart(Xc, calY.codes, factors, labels, { maxDepth: p.treeDepth, minLeaf: 20 });
+        const t = cart(Xc, calY.codes, factors, labels, {
+          maxDepth: p.treeDepth, minLeaf: 20,
+          featureLabels: factors.map(f => cal[f].labels)
+        });
         const rules = t.rules.slice().sort((a, b) => b.support * b.confidence - a.support * a.confidence);
         runs.push({
           label, params: { lowPct: p.lowPct, highPct: p.highPct, levels: p.levels, k: p.k, treeDepth: p.treeDepth },
           accuracy: t.accuracy,
+          targetLevels: calY.levels,
           rules: rules.length,
           top: rules[0] ? rules[0] : null
         });
@@ -2187,18 +2257,18 @@
 
   function configIndex(states, row, parentIdx) {
     let idx = 0;
-    for (const p of parentIdx) idx = idx * states + row[p];
+    for (const p of parentIdx) idx = idx * (Array.isArray(states) ? states[p] : states) + row[p];
     return idx;
   }
 
   function bicScore(data, nStates, node, parents) {
     const n = data.length;
-    const k = nStates;
-    const nParentConfigs = Math.pow(k, parents.length);
+    const k = Array.isArray(nStates) ? nStates[node] : nStates;
+    const nParentConfigs = parents.reduce((n,p) => n * (Array.isArray(nStates) ? nStates[p] : nStates), 1);
     const counts = new Array(nParentConfigs);
     for (let c = 0; c < nParentConfigs; c++) counts[c] = new Array(k).fill(0);
     for (const row of data) {
-      const c = parents.length ? configIndex(k, row, parents) : 0;
+      const c = parents.length ? configIndex(nStates, row, parents) : 0;
       counts[c][row[node]]++;
     }
     let ll = 0;
@@ -2212,24 +2282,29 @@
     }
     // BIC 参数数必须用"理论父配置数" r^|Pa| × (k-1)，
     // 不能用实际出现的配置数（否则会系统性偏爱高入度结构）。
-    const params = Math.pow(k, parents.length) * (k - 1);
+    const params = nParentConfigs * (k - 1);
     return ll - (params / 2) * Math.log(n);
   }
 
   function bnLearn(discrete, names, levels, opt) {
     const o = Object.assign({ maxParents: 2, maxIter: 20, seed: 42 }, opt || {});
     const p = names.length;
+    const cards = o.cardinalities || names.map(() => levels);
+    if (cards.length !== p || cards.some(k => !Number.isInteger(k) || k < 1) ||
+        discrete.some(row => row.some((v,j) => !Number.isInteger(v) || v < 0 || v >= cards[j]))) {
+      throw new Error('BN 状态编码超出声明的变量类别范围');
+    }
     const parents = names.map(() => []);
     const scoreCache = new Map();
     const scoreOf = (node, par) => {
       const key = node + '|' + par.slice().sort((a, b) => a - b).join(',');
-      if (!scoreCache.has(key)) scoreCache.set(key, bicScore(discrete, levels, node, par));
+      if (!scoreCache.has(key)) scoreCache.set(key, bicScore(discrete, cards, node, par));
       return scoreCache.get(key);
     };
     const localScore = parents.map((ps, i) => scoreOf(i, ps));
 
     // 可选：随机起点。seed 不同 → 起点不同 → 可做"多次初始化对比"
-    const r = rng(o.seed || 42);
+    const r = rng(o.seed ?? 42);
     if (o.randomStart) {
       for (let k = 0; k < Math.max(1, Math.floor(p / 2)); k++) {
         const i = Math.floor(r() * p);
@@ -2307,11 +2382,11 @@
     const alpha = o.alpha === undefined ? 1 : Number(o.alpha);
     const cpt = names.map((_, i) => {
       const par = parents[i];
-      const nCfg = Math.pow(levels, par.length);
+      const nCfg = par.reduce((n,j) => n * cards[j], 1);
       const table = [];
-      for (let c = 0; c < nCfg; c++) table.push(new Array(levels).fill(alpha));
+      for (let c = 0; c < nCfg; c++) table.push(new Array(cards[i]).fill(alpha));
       for (const row of discrete) {
-        const c = par.length ? configIndex(levels, row, par) : 0;
+        const c = par.length ? configIndex(cards, row, par) : 0;
         table[c][row[i]]++;
       }
       return table.map(row => {
@@ -2328,7 +2403,7 @@
       throw new Error(`贝叶斯网络结构不是 DAG（环：${dag.cycle.map(k => names[k]).join(' → ')}），已拒绝返回该模型`);
     }
     return {
-      names, levels, parents, cpt, edges,
+      names, levels, cardinalities: cards, parents, cpt, edges,
       score: sum(localScore),
       log,
       converged: !improved,
@@ -2342,16 +2417,17 @@
   function bnJoint(model) {
     const { names, levels, parents, cpt } = model;
     const n = names.length;
-    const total = Math.pow(levels, n);
+    const cards = model.cardinalities || names.map(() => levels);
+    const total = cards.reduce((a,b) => a*b, 1);
     const joint = new Float64Array(total);
     for (let code = 0; code < total; code++) {
       const row = [];
       let x = code;
-      for (let i = n - 1; i >= 0; i--) { row[i] = x % levels; x = Math.floor(x / levels); }
+      for (let i = n - 1; i >= 0; i--) { row[i] = x % cards[i]; x = Math.floor(x / cards[i]); }
       let prob = 1;
       for (let i = 0; i < n; i++) {
         const par = parents[i];
-        const c = par.length ? configIndex(levels, row, par) : 0;
+        const c = par.length ? configIndex(cards, row, par) : 0;
         prob *= cpt[i][c][row[i]];
         if (prob === 0) break;
       }
@@ -2368,12 +2444,12 @@
    * 所以超限时应保留结构、明确禁用推断，而不是把整个 BN 扔掉。
    */
   function bnStateSpace(nVars, levels) {
-    const total = Math.pow(levels, nVars);
+    const total = Array.isArray(levels) ? levels.reduce((a,b) => a*b,1) : Math.pow(levels, nVars);
     const ok = total <= BN_MAX_JOINT;
     return {
       vars: nVars, levels, total, limit: BN_MAX_JOINT, ok,
       // 满足上限时最多能放几个变量
-      maxVars: Math.floor(Math.log(BN_MAX_JOINT) / Math.log(Math.max(2, levels))),
+      maxVars: Math.floor(Math.log(BN_MAX_JOINT) / Math.log(Math.max(2, Array.isArray(levels) ? Math.max(...levels) : levels))),
       readable: total >= 1e8 ? (total / 1e8).toFixed(1) + ' 亿'
         : total >= 1e4 ? (total / 1e4).toFixed(1) + ' 万'
         : String(total)
@@ -2390,18 +2466,19 @@
         throw new Error(`模型结构不是 DAG（环：${dag.cycle.map(k => names[k] || k).join(' → ')}），拒绝推断`);
       }
     }
-    const total = Math.pow(levels, n);
+    const cards = model.cardinalities || names.map(() => levels);
+    const total = cards.reduce((a,b) => a*b,1);
     if (total > BN_MAX_JOINT) {
       throw new Error(`联合空间 ${total}（变量 ${n} × 状态 ${levels}）超出精确推断上限 ${BN_MAX_JOINT}，请减少变量或降低等级数`);
     }
     const joint = bnJoint(model);
     const targetIdx = n - 1;
-    const post = new Array(levels).fill(0);
+    const post = new Array(cards[n-1]).fill(0);
     let zsum = 0;
     for (let code = 0; code < total; code++) {
       const row = [];
       let x = code;
-      for (let i = n - 1; i >= 0; i--) { row[i] = x % levels; x = Math.floor(x / levels); }
+      for (let i = n - 1; i >= 0; i--) { row[i] = x % cards[i]; x = Math.floor(x / cards[i]); }
       let ok = true;
       for (const k in evidence) {
         const i = names.indexOf(k);
@@ -2421,7 +2498,7 @@
         message: '该证据组合在训练数据中概率为 0，无法给出后验分布（可能是样本稀疏或条件互斥）'
       };
     }
-    for (let v = 0; v < levels; v++) post[v] /= zsum;
+    for (let v = 0; v < post.length; v++) post[v] /= zsum;
     return {
       target: names[targetIdx],
       posterior: post,
@@ -2434,7 +2511,8 @@
   /* ---- 敏感度：把某变量逐档固定，看目标分布怎么变 ---- */
   function bnSensitivity(model, varName, levels) {
     const out = [];
-    for (let v = 0; v < levels; v++) {
+    const count = model.cardinalities ? model.cardinalities[model.names.indexOf(varName)] : levels;
+    for (let v = 0; v < count; v++) {
       const ev = {};
       ev[varName] = v;
       const r = bnInfer(model, ev);
@@ -2462,6 +2540,6 @@
     calibrateWith, buildClouds, assignCodes, assignCodesLUT, LUT_MIN_N, detectTargetType, elbowCurve, robustness, nameScenarios,
     zipFiles, toDOCX, nestedCV, bnLearn, bnInfer, bnSensitivity, bnValidateDag, bnStateSpace, BN_MAX_JOINT, toCSV,
     kmeans, silhouette, pca, cart, predictTree, network, report,
-    numericCols, isNum, mean, std, quantile, LEVEL_LABELS
+    numericCols, isNum, mean, std, quantile, LEVEL_LABELS, encodeTarget
   };
 })(typeof window !== 'undefined' ? window : self);

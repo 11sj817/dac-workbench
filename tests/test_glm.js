@@ -73,7 +73,7 @@ test('Gaussian：AIC = -2ll + 2k，R² 在 [0,1]', () => {
   const X = [], y = [];
   for (let i = 0; i < 60; i++) { X.push([i % 8]); y.push(i * 0.3 + (i % 5) * 0.6); }
   const fit = G.fit({ rows: X, y, spec: { numCols: [{ name: 'x', idx: 0 }] }, family: 'gaussian' });
-  const k = fit.p + 1;   // 含方差参数
+  const k = fit.p;   // statsmodels GLM 信息准则：不额外计入 scale
   approx(fit.aic, -2 * fit.logLik + 2 * k, 1e-6, 'AIC');
   approx(fit.bic, -2 * fit.logLik + k * Math.log(fit.n), 1e-6, 'BIC');
   assert(fit.r2 >= 0 && fit.r2 <= 1, `R²=${fit.r2} 应在 [0,1]`);

@@ -1,0 +1,34 @@
+{
+  "date": "2026-11-03",
+  "scope": "UI-generated documents independently reopened; native Office layout not verified",
+  "checks": [
+    {
+      "kind": "word",
+      "bytes": 7758,
+      "sha256": "c43dc84c00599efda3dd5aa9c7110390e49e1a3a42c1c1093dd31ad8cc2213d0",
+      "zip_crc": "pass",
+      "xml_parse": "pass"
+    },
+    {
+      "kind": "session",
+      "bytes": 8819,
+      "sha256": "c891d2438b4315bf254788df4d585c9cd990af6005e4aab1763b25f064d16c35",
+      "zip_crc": "pass",
+      "xml_parse": "pass"
+    },
+    {
+      "kind": ".xlsx",
+      "bytes": 3560,
+      "sha256": "b9950a73f4bba36033a85d505d7ceecbb5d4bd695609186880a4ce5d9b9438ca",
+      "zip_crc": "pass",
+      "xml_parse": "pass"
+    },
+    {
+      "kind": "project",
+      "version": "6.5.0",
+      "rows": 120,
+      "target": "outcome",
+      "fingerprint": true
+    }
+  ]
+}
