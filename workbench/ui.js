@@ -612,7 +612,16 @@
     const { target, factors, params } = S;
     const idxT = S.columns.indexOf(target);
     const idxF = factors.map(f => S.columns.indexOf(f));
-    const keep = S.rows.filter(r => C.isNum(r[idxT]) && idxF.every(j => C.isNum(r[j])));
+    // 记下「进入分析的样本」对应原始表里的哪一行 —— 下钻与导出要靠它
+    const keepRawIdx = [];
+    S.rows.forEach((r, i) => {
+      if (C.isNum(r[idxT]) && idxF.every(j => C.isNum(r[j]))) keepRawIdx.push(i);
+    });
+    const keep = keepRawIdx.map(i => S.rows[i]);
+    // 稳定 rowId：上传 CSV 用解析时的原始行号，内置数据用 1-based 行号
+    const rowIds = keepRawIdx.map(i =>
+      (S.importMeta && Array.isArray(S.importMeta.rowIds) && S.importMeta.rowIds[i] !== undefined)
+        ? S.importMeta.rowIds[i] : (i + 1));
     const yv = keep.map(r => r[idxT]);
     const X = keep.map(r => idxF.map(j => r[j]));
 
@@ -652,7 +661,7 @@
       const mean = { };
       factors.forEach((f, j) => { mean[f] = members.reduce((s, i) => s + X[i][j], 0) / members.length; });
       mean[target] = members.reduce((s, i) => s + yv[i], 0) / members.length;
-      stats.push({ name: 'S' + (c + 1), n: members.length, mean });
+      stats.push({ name: 'S' + (c + 1), n: members.length, mean, rowIds: members.map(i => rowIds[i]) });
     }
 
     // 决策树（用校准后的等级）
@@ -710,6 +719,7 @@
     const res = {
       meta: {
         target, factors, rows: S.rows.length, usedRows: keep.length, params,
+        rowIds, keepRawIdx,
         // 目标类型决定后续能不能算 Pearson、能不能比均值 —— 必须一路带下去
         targetType: (function () {
           let detected = { type: 'continuous', levels: 0, reason: '' };
@@ -2086,7 +2096,7 @@
     const b = el('tbody');
     sc.stats.forEach((s, i) => {
       const nm = (sc.names && sc.names[i]) || { tag: '', perf: '' };
-      b.appendChild(el('tr', { html:
+      const tr = el('tr', { html:
         `<td>${esc(s.name)}</td>
          <td style="text-align:left"><span class="pill ok">${esc(nm.tag || '-')}</span> <span class="muted">${esc(nm.perf || '')}</span></td>
          <td>${s.n}</td>` +
@@ -2094,7 +2104,98 @@
         // 无序类别不显示目标均值：类别均值取决于编码，没有解释意义
         (tgtInfo(S.res).nominal
           ? `<td><span class="muted">类别目标<br>不判高低</span></td>`
-          : `<td><b>${fmt(s.mean[S.res.meta.target], 3)}</b></td>`) }));
+          : `<td><b>${fmt(s.mean[S.res.meta.target], 3)}</b></td>`) + `</tr>` });
+      // 下钻：列出该情境的稳定 rowId，可筛选、可导出
+      const td = el('td');
+      const bD = el('button', { class: 'ghost mini', text: `查看样本(${s.n})` });
+      const drill = el('div', { style: 'display:none;margin:6px 0 10px' });
+      bD.onclick = () => {
+        const show = drill.style.display === 'none';
+        drill.style.display = show ? '' : 'none';
+        if (!show || drill.dataset.built) return;
+        drill.dataset.built = '1';
+        const ids = s.rowIds || [];
+        const inp = el('input', { placeholder: '按 rowId 过滤，逗号分隔或范围如 1-20', style: 'width:100%;margin-bottom:6px' });
+        const cnt = el('div', { class: 'muted', style: 'margin-bottom:6px' });
+        const t = el('table');
+        const head = ['rowId', S.res.meta.target, ...S.res.meta.factors];
+        t.appendChild(el('thead', { html: '<tr>' + head.map(h => `<th>${esc(h)}</th>`).join('') + '</tr>' }));
+        const tb = el('tbody');
+        t.appendChild(tb);
+        const draw = () => {
+          const txt = inp.value.trim();
+          let keepIdx = new Set(ids);
+          if (txt) {
+            const want = new Set();
+            txt.split(',').forEach(seg => {
+              seg = seg.trim();
+              const m2 = seg.match(/^(\d+)\s*-\s*(\d+)$/);
+              if (m2) { for (let k = +m2[1]; k <= +m2[2]; k++) want.add(k); }
+              else if (seg) want.add(+seg);
+            });
+            keepIdx = new Set(ids.filter(x => want.has(x)));
+          }
+          tb.innerHTML = '';
+          const meta = S.res.meta;
+          // rowId → 原始行下标
+          const id2raw = new Map();
+          (meta.rowIds || []).forEach((rid, k) => id2raw.set(rid, meta.keepRawIdx[k]));
+          Array.from(keepIdx).slice(0, 200).forEach(rid => {
+            const raw = id2raw.get(rid);
+            const row = raw === undefined ? null : S.rows[raw];
+            tb.appendChild(el('tr', { html: `<td>${rid}</td>` + (row
+              ? head.slice(1).map(h => {
+                  const j = S.columns.indexOf(h);
+                  const v = j < 0 ? '' : row[j];
+                  return `<td>${v === null ? '<span class="muted">∅</span>' : esc(String(v)).slice(0, 18)}</td>`;
+                }).join('')
+              : '<td colspan="9" class="muted">原始行不可用</td>') }));
+          });
+          cnt.textContent = `匹配 ${keepIdx.size} 条` + (keepIdx.size > 200 ? '（只显示前 200 条，导出为全部）' : '');
+        };
+        const bExp = el('button', { class: 'ghost mini', text: '导出这些样本 CSV' });
+        bExp.onclick = () => {
+          const ids2 = Array.from(new Set((s.rowIds || []))).filter(x => {
+            const txt = inp.value.trim();
+            if (!txt) return true;
+            let hit = false;
+            txt.split(',').forEach(seg => {
+              seg = seg.trim();
+              const m2 = seg.match(/^(\d+)\s*-\s*(\d+)$/);
+              if (m2) { if (x >= +m2[1] && x <= +m2[2]) hit = true; }
+              else if (+seg === x) hit = true;
+            });
+            return hit;
+          });
+          const meta = S.res.meta;
+          const id2raw = new Map();
+          (meta.rowIds || []).forEach((rid, k) => id2raw.set(rid, meta.keepRawIdx[k]));
+          const head2 = ['rowId', ...S.columns];
+          const rows2 = ids2.map(rid => {
+            const raw = id2raw.get(rid);
+            return [rid].concat(raw === undefined ? [] : S.rows[raw].slice());
+          });
+          const csv = C.toCSV(head2, rows2);
+          download(`情境${s.name}_样本_${stamp()}.csv`, '﻿' + csv, 'text/csv');
+          toast(`已导出 ${ids2.length} 条样本`);
+        };
+        inp.oninput = draw;
+        drill.appendChild(inp);
+        drill.appendChild(cnt);
+        drill.appendChild(bExp);
+        drill.appendChild(t);
+        draw();
+      };
+      td.appendChild(bD);
+      tr.appendChild(td);
+      b.appendChild(tr);
+      if (s.rowIds && s.rowIds.length) {
+        const tr2 = el('tr');
+        const td2 = el('td', { colspan: String(S.columns.length + 3) });
+        td2.appendChild(drill);
+        tr2.appendChild(td2);
+        b.appendChild(tr2);
+      }
     });
     tb.appendChild(b);
     pane.appendChild(el('h3', { text: '各情境变量均值', style: 'margin-top:16px' }));
