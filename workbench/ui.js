@@ -1060,9 +1060,11 @@
     } else if (corr && corr.matrix && corrNames) {
       const idx = corrNames.indexOf(tgt);
       if (idx >= 0) {
+        // 只保留本次选中的因子：取消勾选/被排除的列不能借相关矩阵"回流"
+        const activeSet = new Set(r.meta.factors || []);
         const pairs = corrNames
           .map((n, j) => ({ n, r: corr.matrix[idx][j] }))
-          .filter(x => x.n !== tgt && Number.isFinite(x.r))
+          .filter(x => x.n !== tgt && Number.isFinite(x.r) && activeSet.has(x.n))
           .sort((a, b) => Math.abs(b.r) - Math.abs(a.r));
         if (pairs.length) {
           const top = pairs.slice(0, 3).map(x => `${esc(x.n)}(r=${x.r.toFixed(2)})`).join('、');
